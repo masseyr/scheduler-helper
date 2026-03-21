@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tasking-helper"
+version = "0.1.0"
+description = "Satellite tasking utilities: TLE parsing, covariance generation, satellite catalog"
+requires-python = ">=3.9"
+dependencies = ["numpy"]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-cov"]
+
+[project.scripts]
+tasking-helper = "tasking_helper.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tasking_helper"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v"

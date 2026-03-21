@@ -1,0 +1,638 @@
+"""
+orbital_frames.tle — Two-Line Element Set Parser & Propagator
+==============================================================
+
+Parses NORAD Two-Line Element sets and propagates satellite state
+from the TLE epoch to arbitrary times using analytic J2 perturbations.
+
+The propagator uses mean Keplerian elements with Brouwer J2 secular
+rates on RAAN and argument of perigee, plus a simple drag model via
+the TLE's Bstar coefficient.  This is *not* a full SGP4 implementation
+but is sufficient for task-scheduling visibility windows where ~1 km
+position accuracy over hours-to-days is acceptable.
+
+For higher fidelity, feed the TLE-derived epoch state into an external
+propagator via the ``epoch_state_eci`` output.
+
+Reference
+---------
+Vallado, D.A. (2013). *Fundamentals of Astrodynamics*, 4th ed., §9.4.
+Hoots, F.R. & Roehrich, R.L. (1980). SPACETRACK Report No. 3.
+"""
+import copy
+
+import numpy as np
+from numpy.typing import NDArray
+from dataclasses import dataclass
+
+from .utils import MU_EARTH, R_EARTH, J2
+
+
+_TWO_PI = 2.0 * np.pi
+_REV_DAY_TO_RAD_S = _TWO_PI / 86400.0   # rev/day → rad/s
+
+
+@dataclass
+class TLE:
+    """Parsed Two-Line Element set with derived quantities."""
+    # ── Raw TLE fields ──
+    name: str = ""
+    norad_id: int = 0
+    classification: str = "U"
+    intl_designator: str = ""
+    epoch_year: int = 2000
+    epoch_day: float = 1.0
+    ndot: float = 0.0           # 1st derivative of mean motion [rev/day²]
+    nddot: float = 0.0          # 2nd derivative of mean motion [rev/day³]
+    bstar: float = 0.0          # B* drag term [1/R_earth]
+    element_set: int = 0
+    inclination: float = 0.0    # [rad]
+    raan: float = 0.0           # [rad]
+    eccentricity: float = 0.0
+    argp: float = 0.0           # [rad]
+    mean_anomaly: float = 0.0   # [rad]
+    mean_motion: float = 0.0    # [rev/day]
+    rev_number: int = 0
+
+    # ── Derived quantities (computed on parse) ──
+    epoch_jd: float = 0.0       # Julian Date of TLE epoch
+    semi_major_axis: float = 0.0  # [m]
+
+    # ── User-assigned metadata ──
+    priority: int = 5           # scheduling priority (1=highest, 10=lowest)
+    revisit_rate: float = 0.0   # desired revisit interval [s]
+    catalog_id: str = ""        # user label
+
+    @property
+    def period(self) -> float:
+        """Full orbit period [min]."""
+        return 1440.0 / self.mean_motion
+
+    @property
+    def apogee(self) -> float | None:
+        if self.semi_major_axis > 0.0:
+            return (self.semi_major_axis * (1 + self.eccentricity) - R_EARTH) / 1000.0
+
+    @property
+    def perigee(self) -> float | None:
+        if self.semi_major_axis > 0.0:
+            return (self.semi_major_axis * (1 - self.eccentricity) - R_EARTH) / 1000.0
+
+    @property
+    def orbit_type(self) -> str:
+        """Returns orbit type string: LEO, HEO, MEO or GEO."""
+        if self.period < 225:
+            return "LEO"
+        elif self.eccentricity >= 0.3:
+            return "HEO"
+        elif self.period < 800:
+            return "MEO"
+        else:
+            return "GEO"
+
+
+def parse_tle(*lines) -> TLE:
+    """Parse a three-line TLE (name + line 1 + line 2).
+
+    Parameters
+    ----------
+    lines: TLE lines
+
+    Returns
+    -------
+    tle : TLE dataclass
+    """
+    line0 = ''
+    if len(lines) == 3:
+        line0, line1, line2 = lines
+    elif len(lines) == 2:
+        line1, line2 = lines
+
+    t = TLE()
+    t.name = line0.strip()
+
+    # ── Line 1 ──
+    t.norad_id = int(line1[2:7].strip())
+    t.classification = line1[7]
+    t.intl_designator = line1[9:17].strip()
+
+    yr = int(line1[18:20].strip())
+    t.epoch_year = yr + (1900 if yr >= 57 else 2000)
+    t.epoch_day = float(line1[20:32].strip())
+
+    t.ndot = float(line1[33:43].strip())
+
+    # nddot: special format (leading decimal assumed, exponent)
+    nddot_str = line1[44:52].strip()
+    if nddot_str:
+        mantissa = float("0." + nddot_str[:5].replace(" ", "0").replace("+", "").replace("-", ""))
+        if nddot_str[0] == '-':
+            mantissa = -mantissa
+        exp = int(nddot_str[-2:]) if len(nddot_str) > 5 else 0
+        t.nddot = mantissa * 10 ** exp
+    else:
+        t.nddot = 0.0
+
+    # Bstar: same format
+    bstar_str = line1[53:61].strip()
+    if bstar_str:
+        sign = -1.0 if bstar_str[0] == '-' else 1.0
+        bstar_clean = bstar_str.lstrip('+-').replace(' ', '0')
+        if len(bstar_clean) >= 6:
+            mantissa = float("0." + bstar_clean[:5])
+            exp = int(bstar_clean[5:].replace('+', '').replace('-', '-') or '0')
+            if '-' in bstar_clean[5:]:
+                exp = -abs(exp)
+            t.bstar = sign * mantissa * 10 ** exp
+        else:
+            t.bstar = 0.0
+    else:
+        t.bstar = 0.0
+
+    t.element_set = int(line1[64:68].strip()) if line1[64:68].strip() else 0
+
+    # ── Line 2 ──
+    t.inclination = np.deg2rad(float(line2[8:16].strip()))
+    t.raan = np.deg2rad(float(line2[17:25].strip()))
+    t.eccentricity = float("0." + line2[26:33].strip())
+    t.argp = np.deg2rad(float(line2[34:42].strip()))
+    t.mean_anomaly = np.deg2rad(float(line2[43:51].strip()))
+    t.mean_motion = float(line2[52:63].strip())  # [rev/day]
+
+    t.rev_number = int(line2[63:68].strip()) if line2[63:68].strip() else 0
+
+    # ── Derived quantities ──
+    n_rad_s = t.mean_motion * _REV_DAY_TO_RAD_S
+    t.semi_major_axis = (MU_EARTH / n_rad_s**2) ** (1.0 / 3.0)
+    t.epoch_jd = _epoch_to_jd(t.epoch_year, t.epoch_day)
+    t.catalog_id = f"{t.norad_id:05d}"
+
+    return t
+
+
+def parse_tle_batch(text: str) -> list[TLE]:
+    """Parse multiple TLEs from a multi-line string.
+
+    Handles both 2-line (no name) and 3-line (name + lines) formats.
+
+    Parameters
+    ----------
+    text : str — concatenated TLE text
+
+    Returns
+    -------
+    tles : list[TLE]
+    """
+    lines = [l.rstrip() for l in text.strip().splitlines() if l.strip()]
+    tles = []
+    i = 0
+    while i < len(lines):
+        if lines[i].startswith("1 ") and i + 1 < len(lines) and lines[i + 1].startswith("2 "):
+            tles.append(parse_tle("", lines[i], lines[i + 1]))
+            i += 2
+        elif (i + 2 < len(lines) and lines[i + 1].startswith("1 ")
+              and lines[i + 2].startswith("2 ")):
+            tles.append(parse_tle(lines[i], lines[i + 1], lines[i + 2]))
+            i += 3
+        else:
+            i += 1
+    return tles
+
+
+def _epoch_to_jd(year: int, day_of_year: float) -> float:
+    """Convert TLE epoch (year, fractional day) to Julian Date."""
+    a = (14 - 1) // 12
+    y = year + 4800 - a
+    m = 1 + 12 * a - 3
+    jd_jan1 = 1 + ((153 * m + 2) // 5) + 365 * y + (y // 4) - (y // 100) + (y // 400) - 32045
+    jd_jan1 -= 0.5  # Julian Date convention (noon)
+    return jd_jan1 + day_of_year
+
+
+def _solve_kepler(M: float, e: float) -> float:
+    """Newton–Raphson solution of Kepler's equation  M = E − e sin E."""
+    E = M + e * np.sin(M)
+    for _ in range(50):
+        dE = (M - E + e * np.sin(E)) / (1.0 - e * np.cos(E))
+        E += dE
+        if abs(dE) < 1e-12:
+            break
+    return E
+
+
+def keplerian_to_eci(
+    a: float, e: float, i: float, raan: float, argp: float, nu: float
+) -> tuple[NDArray, NDArray]:
+    """Convert Keplerian elements to ECI position [m] and velocity [m/s].
+
+    Parameters
+    ----------
+    a    : semi-major axis [m]
+    e    : eccentricity
+    i    : inclination [rad]
+    raan : right ascension of ascending node [rad]
+    argp : argument of perigee [rad]
+    nu   : true anomaly [rad]
+
+    Returns
+    -------
+    r_eci : (3,) [m]
+    v_eci : (3,) [m/s]
+    """
+    p = a * (1.0 - e**2)
+    r_mag = p / (1.0 + e * np.cos(nu))
+    sqrt_mup = np.sqrt(MU_EARTH / p)
+
+    r_pf = r_mag * np.array([np.cos(nu), np.sin(nu), 0.0])
+    v_pf = sqrt_mup * np.array([-np.sin(nu), e + np.cos(nu), 0.0])
+
+    cr, sr = np.cos(raan), np.sin(raan)
+    ci, si = np.cos(i),    np.sin(i)
+    ca, sa = np.cos(argp), np.sin(argp)
+
+    # Perifocal → ECI  (313 Euler: Rz(−Ω)·Rx(−i)·Rz(−ω))
+    R = np.array([
+        [ cr*ca - sr*sa*ci,  -cr*sa - sr*ca*ci,  sr*si],
+        [ sr*ca + cr*sa*ci,  -sr*sa + cr*ca*ci, -cr*si],
+        [ sa*si,               ca*si,             ci  ],
+    ])
+    return R @ r_pf, R @ v_pf
+
+
+def tle_epoch_state(tle: TLE) -> tuple[NDArray, NDArray]:
+    """Get the ECI state vector at the TLE epoch.
+
+    Uses the mean elements to compute an osculating state.
+
+    Returns
+    -------
+    r_eci : (3,) — position [m]
+    v_eci : (3,) — velocity [m/s]
+    """
+    E = _solve_kepler(tle.mean_anomaly, tle.eccentricity)
+    nu = 2.0 * np.arctan2(
+        np.sqrt(1.0 + tle.eccentricity) * np.sin(E / 2.0),
+        np.sqrt(1.0 - tle.eccentricity) * np.cos(E / 2.0),
+    )
+    return keplerian_to_eci(
+        tle.semi_major_axis, tle.eccentricity, tle.inclination,
+        tle.raan, tle.argp, nu,
+    )
+
+
+def _j2_secular_rates(n_rad_s: float, a: float, e: float, inc: float) -> tuple[float, float]:
+    """Compute J2 secular drift rates for RAAN and argument of perigee.
+
+    Parameters
+    ----------
+    n_rad_s : mean motion [rad/s]
+    a       : semi-major axis [m]
+    e       : eccentricity
+    inc     : inclination [rad]
+
+    Returns
+    -------
+    raan_dot, argp_dot : float — rates [rad/s]
+    """
+    p = a * (1.0 - e**2)
+    factor = -1.5 * n_rad_s * J2 * (R_EARTH / p) ** 2
+    cos_i = np.cos(inc)
+    sin_i = np.sin(inc)
+    return factor * cos_i, factor * (2.0 - 2.5 * sin_i**2)
+
+
+def propagate_tle(tle: TLE, jd: float) -> tuple[NDArray, NDArray]:
+    """Propagate TLE to a given Julian Date using J2 + simple drag.
+
+    Parameters
+    ----------
+    tle : TLE — parsed TLE
+    jd : float — target Julian Date
+
+    Returns
+    -------
+    r_eci : (3,) — position at jd [m]
+    v_eci : (3,) — velocity at jd [m/s]
+    """
+    dt = (jd - tle.epoch_jd) * 86400.0  # seconds since epoch
+
+    n_rad_s = tle.mean_motion * _REV_DAY_TO_RAD_S
+    e = tle.eccentricity
+    inc = tle.inclination
+
+    raan_dot, argp_dot = _j2_secular_rates(n_rad_s, tle.semi_major_axis, e, inc)
+
+    # Simple drag: ndot in rev/day² → rad/s²
+    n_dot_rad_s2 = tle.ndot * _REV_DAY_TO_RAD_S / 86400.0
+    n_at_t = n_rad_s + n_dot_rad_s2 * dt
+    a_at_t = (MU_EARTH / n_at_t**2) ** (1.0 / 3.0)
+
+    raan_at_t = tle.raan + raan_dot * dt
+    argp_at_t = tle.argp + argp_dot * dt
+    M_at_t = (tle.mean_anomaly + n_rad_s * dt + 0.5 * n_dot_rad_s2 * dt**2) % _TWO_PI
+
+    E = _solve_kepler(M_at_t, e)
+    nu = 2.0 * np.arctan2(
+        np.sqrt(1.0 + e) * np.sin(E / 2.0),
+        np.sqrt(1.0 - e) * np.cos(E / 2.0),
+    )
+
+    return keplerian_to_eci(a_at_t, e, inc, raan_at_t, argp_at_t, nu)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  TLE Checksum
+# ════════════════════════════════════════════════════════════════════════════
+
+def tle_checksum(line: str) -> int:
+    """Compute the modulo-10 checksum for a TLE line.
+
+    Each digit contributes its face value, '-' counts as 1,
+    all other characters count as 0.  The result is sum mod 10.
+
+    Parameters
+    ----------
+    line : str — a TLE line (characters 0..67; column 69 is the checksum)
+
+    Returns
+    -------
+    checksum : int — single digit 0-9
+    """
+    s = 0
+    for ch in line[:68]:
+        if ch.isdigit():
+            s += int(ch)
+        elif ch == '-':
+            s += 1
+    return s % 10
+
+
+def verify_checksum(line: str) -> bool:
+    """Verify the modulo-10 checksum of a TLE line.
+
+    Parameters
+    ----------
+    line : str — a complete TLE line (69 characters with checksum at column 69)
+
+    Returns
+    -------
+    valid : bool — True if the last digit matches the computed checksum
+    """
+    if len(line) < 69:
+        return False
+    return tle_checksum(line) == int(line[68])
+
+
+def verify_tle(line1: str, line2: str) -> dict:
+    """Verify checksums and basic structural validity of a TLE pair.
+
+    Parameters
+    ----------
+    line1, line2 : str — TLE lines 1 and 2
+
+    Returns
+    -------
+    dict with:
+        'valid' : bool — both lines pass all checks
+        'line1_checksum' : bool — line 1 checksum valid
+        'line2_checksum' : bool — line 2 checksum valid
+        'line1_prefix' : bool — line 1 starts with '1 '
+        'line2_prefix' : bool — line 2 starts with '2 '
+        'norad_match' : bool — NORAD IDs match between lines
+        'errors' : list[str]
+    """
+    errors = []
+
+    l1_pfx = line1.startswith("1 ")
+    l2_pfx = line2.startswith("2 ")
+    if not l1_pfx:
+        errors.append("line1 does not start with '1 '")
+    if not l2_pfx:
+        errors.append("line2 does not start with '2 '")
+
+    l1_ck = verify_checksum(line1)
+    l2_ck = verify_checksum(line2)
+    if not l1_ck:
+        errors.append(f"line1 checksum: expected {tle_checksum(line1)}, got {line1[68] if len(line1) >= 69 else '?'}")
+    if not l2_ck:
+        errors.append(f"line2 checksum: expected {tle_checksum(line2)}, got {line2[68] if len(line2) >= 69 else '?'}")
+
+    try:
+        id1 = int(line1[2:7].strip())
+        id2 = int(line2[2:7].strip())
+        norad_ok = id1 == id2
+        if not norad_ok:
+            errors.append(f"NORAD ID mismatch: line1={id1}, line2={id2}")
+    except (ValueError, IndexError):
+        norad_ok = False
+        errors.append("could not parse NORAD IDs")
+
+    return {
+        "valid": l1_pfx and l2_pfx and l1_ck and l2_ck and norad_ok,
+        "line1_checksum": l1_ck,
+        "line2_checksum": l2_ck,
+        "line1_prefix": l1_pfx,
+        "line2_prefix": l2_pfx,
+        "norad_match": norad_ok,
+        "errors": errors,
+    }
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  TLE Export (Format to Strings)
+# ════════════════════════════════════════════════════════════════════════════
+
+def _format_exp_field(value: float) -> str:
+    """Format a value in TLE's special exponent notation.
+
+    TLE format: ±NNNNN±E  where value = ±0.NNNNN × 10^±E
+    Example: 0.000123 → ' 12300-3'  (note: leading space or minus)
+             -0.00456 → '-45600-2'
+    """
+    if value == 0.0:
+        return " 00000-0"
+
+    sign = '-' if value < 0 else ' '
+    val = abs(value)
+
+    exp = int(np.floor(np.log10(val))) + 1
+    mantissa = val / (10.0 ** exp)
+
+    digits = f"{mantissa:.5f}"[2:7]  # 5 digits after '0.'
+    exp_sign = '+' if exp >= 0 else '-'
+    return f"{sign}{digits}{exp_sign}{abs(exp)}"
+
+
+def tle_to_lines(tle: TLE) -> tuple[str, str]:
+    """Export a TLE dataclass back to standard two-line element strings.
+
+    Produces properly formatted 69-character lines with valid checksums.
+
+    Parameters
+    ----------
+    tle : TLE — parsed or constructed TLE
+
+    Returns
+    -------
+    line1, line2 : str — TLE line 1 and line 2 (69 chars each)
+    """
+    epoch_str = f"{tle.epoch_year % 100:02d}{tle.epoch_day:012.8f}"
+
+    if tle.ndot >= 0:
+        ndot_field = f" {abs(tle.ndot):.8f}"[:10]
+    else:
+        ndot_field = f"{tle.ndot:.8f}"[:10]
+
+    nddot_field = _format_exp_field(tle.nddot)
+    bstar_field = _format_exp_field(tle.bstar)
+
+    line1_body = (
+        f"1 {tle.norad_id:05d}{tle.classification} "
+        f"{tle.intl_designator:<8s} "
+        f"{epoch_str} "
+        f"{ndot_field} "
+        f"{nddot_field} "
+        f"{bstar_field} "
+        f"0"
+        f"{tle.element_set:4d}"
+    )
+    line1_body = f"{line1_body:<68s}"[:68]
+    line1 = line1_body + str(tle_checksum(line1_body))
+
+    ecc_str = f"{tle.eccentricity:.7f}"[2:]  # drop "0."
+    line2_body = (
+        f"2 {tle.norad_id:05d} "
+        f"{np.rad2deg(tle.inclination) % 360:8.4f} "
+        f"{np.rad2deg(tle.raan) % 360:8.4f} "
+        f"{ecc_str} "
+        f"{np.rad2deg(tle.argp) % 360:8.4f} "
+        f"{np.rad2deg(tle.mean_anomaly) % 360:8.4f} "
+        f"{tle.mean_motion:11.8f}"
+        f"{tle.rev_number % 100000:5d}"
+    )
+    line2_body = f"{line2_body:<68s}"[:68]
+    line2 = line2_body + str(tle_checksum(line2_body))
+
+    return line1, line2
+
+
+def tle_to_string(tle: TLE, include_name: bool = True) -> str:
+    """Export a TLE to a complete multi-line string.
+
+    Parameters
+    ----------
+    tle : TLE
+    include_name : bool — if True, prepend the satellite name line
+
+    Returns
+    -------
+    text : str — 2 or 3 line TLE string
+    """
+    line1, line2 = tle_to_lines(tle)
+    if include_name and tle.name:
+        return f"{tle.name}\n{line1}\n{line2}"
+    return f"{line1}\n{line2}"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  TLE Epoch & Mean Anomaly Update
+# ════════════════════════════════════════════════════════════════════════════
+
+def _jd_to_epoch(jd: float) -> tuple[int, float]:
+    """Convert Julian Date to TLE epoch (year, fractional day-of-year)."""
+    z = int(jd + 0.5)
+    f = (jd + 0.5) - z
+    if z < 2299161:
+        a = z
+    else:
+        alpha = int((z - 1867216.25) / 36524.25)
+        a = z + 1 + alpha - alpha // 4
+    b = a + 1524
+    c = int((b - 122.1) / 365.25)
+    d = int(365.25 * c)
+    e = int((b - d) / 30.6001)
+
+    day = b - d - int(30.6001 * e) + f
+    month = e - 1 if e < 14 else e - 13
+    year = c - 4716 if month > 2 else c - 4715
+
+    jd_jan1 = _epoch_to_jd(year, 1.0)
+    day_of_year = jd - jd_jan1 + 1.0
+
+    return int(year), float(day_of_year)
+
+
+def update_epoch(tle: TLE, new_jd: float, propagate: bool = True) -> TLE:
+    """Create a new TLE with an updated epoch and propagated mean anomaly.
+
+    Advances (or retards) the mean anomaly by the time difference
+    from the old epoch to the new epoch, applying J2 secular rates
+    on RAAN and argument of perigee and drag on mean motion.
+
+    The returned TLE is a new object; the original is not modified.
+
+    Parameters
+    ----------
+    tle : TLE — source TLE
+    new_jd : float — new epoch Julian Date
+    propagate : bool — if True, propagate mean anomaly, RAAN, argp,
+        and mean motion to the new epoch.  If False, only update
+        the epoch timestamp (mean anomaly unchanged).
+
+    Returns
+    -------
+    new_tle : TLE — updated copy
+    """
+    t = copy.deepcopy(tle)
+
+    new_year, new_day = _jd_to_epoch(new_jd)
+    t.epoch_year = new_year
+    t.epoch_day = new_day
+    t.epoch_jd = new_jd
+
+    if propagate:
+        dt = (new_jd - tle.epoch_jd) * 86400.0  # seconds
+
+        n_rad_s = tle.mean_motion * _REV_DAY_TO_RAD_S
+        e = tle.eccentricity
+        a = tle.semi_major_axis
+
+        raan_dot, argp_dot = _j2_secular_rates(n_rad_s, a, e, tle.inclination)
+
+        # ndot in rev/day² → rad/s²
+        n_dot_rad_s2 = tle.ndot * _REV_DAY_TO_RAD_S / 86400.0
+
+        t.raan = (tle.raan + raan_dot * dt) % _TWO_PI
+        t.argp = (tle.argp + argp_dot * dt) % _TWO_PI
+        t.mean_anomaly = (tle.mean_anomaly + n_rad_s * dt
+                          + 0.5 * n_dot_rad_s2 * dt**2) % _TWO_PI
+
+        n_at_t = n_rad_s + n_dot_rad_s2 * dt
+        t.mean_motion = n_at_t / _REV_DAY_TO_RAD_S
+        t.semi_major_axis = (MU_EARTH / n_at_t**2) ** (1.0 / 3.0)
+
+        # period is in minutes; dt is in seconds
+        revs = abs(dt) / (tle.period * 60.0)
+        if dt >= 0:
+            t.rev_number = tle.rev_number + int(revs)
+        else:
+            t.rev_number = max(0, tle.rev_number - int(revs))
+
+    return t
+
+
+def update_mean_anomaly(tle: TLE, new_mean_anomaly: float) -> TLE:
+    """Create a new TLE with a replaced mean anomaly (no propagation).
+
+    Parameters
+    ----------
+    tle : TLE — source TLE
+    new_mean_anomaly : float — new mean anomaly [rad]
+
+    Returns
+    -------
+    new_tle : TLE — copy with updated mean anomaly
+    """
+    t = copy.deepcopy(tle)
+    t.mean_anomaly = new_mean_anomaly % _TWO_PI
+    return t
