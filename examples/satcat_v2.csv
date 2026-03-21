@@ -1,0 +1,2 @@
+#CatalogNumber, Name, IntlDes, Country, Launch, Decay, a, e, i, ObjType, SizeType, Size (m), CSA (m^2), UHF RCS, L Band RCS, S Band RCS, X Band RCS
+25544, ISS (ZARYA), 98067A, US, 1998-11-20, NULL, 6730.960677, 0.0006703, 51.6416, PAYLOAD, SPHERE, 1.5, 1.76715, 1.43408, 1.84991, 1.78181, 1.76684
