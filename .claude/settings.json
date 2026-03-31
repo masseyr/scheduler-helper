@@ -1,7 +1,10 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python -:*)"
+      "Bash(python -:*)",
+      "Bash(python -m pytest tests/test_jdate.py -v)",
+      "Bash(python -m pytest tests/test_propagation_comparison.py -v -s)",
+      "Bash(python -m pytest tests/test_propagation_comparison.py::TestMolniyaPropagation -v -s)"
     ]
   }
 }

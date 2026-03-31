@@ -1,12 +1,13 @@
 """Unit tests for tasking_helper.utils.jdate."""
 
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from tasking_helper.utils.jdate import (
     J2000,
+    JulianDate,
     datetime_to_jd,
     epoch_to_jd,
     fmt_epoch,
@@ -209,3 +210,195 @@ class TestParseEpoch:
         t1 = datetime.strptime(epoch_str, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
         t2 = datetime.strptime(result, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
         assert abs((t2 - t1).total_seconds()) <= 1
+
+
+# ── JulianDate class ─────────────────────────────────────────────────────────
+
+class TestJulianDateConstruction:
+    def test_from_float(self):
+        jd = JulianDate(J2000)
+        assert jd.jd == J2000
+
+    def test_from_datetime(self):
+        dt = datetime(2000, 1, 1, 12, tzinfo=timezone.utc)
+        jd = JulianDate.from_datetime(dt)
+        assert math.isclose(jd.jd, J2000, abs_tol=1e-10)
+
+    def test_from_epoch(self):
+        jd = JulianDate.from_epoch(2000, 1.5)
+        assert math.isclose(jd.jd, J2000, abs_tol=1e-6)
+
+    def test_from_string_iso(self):
+        jd = JulianDate.from_string("2000-01-01T12:00:00")
+        assert math.isclose(jd.jd, J2000, abs_tol=1e-6)
+
+    def test_from_string_tle(self):
+        jd = JulianDate.from_string("00001.50000000")
+        assert math.isclose(jd.jd, J2000, abs_tol=1e-6)
+
+
+class TestJulianDateConversions:
+    def test_to_datetime(self):
+        jd = JulianDate(J2000)
+        dt = jd.to_datetime()
+        assert dt == datetime(2000, 1, 1, 12, tzinfo=timezone.utc)
+
+    def test_to_string_default(self):
+        jd = JulianDate(J2000)
+        assert jd.to_string() == "2000-01-01T12:00:00"
+
+    def test_to_string_custom_fmt(self):
+        jd = JulianDate(J2000)
+        assert jd.to_string("%Y/%m/%d") == "2000/01/01"
+
+    def test_float(self):
+        jd = JulianDate(J2000)
+        assert float(jd) == J2000
+
+    def test_str(self):
+        jd = JulianDate(J2000)
+        assert str(jd) == "2000-01-01T12:00:00"
+
+    def test_repr(self):
+        jd = JulianDate(J2000)
+        assert repr(jd) == f"JulianDate({J2000})"
+
+
+class TestJulianDateArithmetic:
+    def setup_method(self):
+        self.jd = JulianDate(J2000)
+
+    def test_add_float(self):
+        result = self.jd + 1.0
+        assert isinstance(result, JulianDate)
+        assert result.jd == J2000 + 1.0
+
+    def test_add_int(self):
+        result = self.jd + 10
+        assert result.jd == J2000 + 10
+
+    def test_add_timedelta(self):
+        result = self.jd + timedelta(hours=12)
+        assert math.isclose(result.jd, J2000 + 0.5, abs_tol=1e-10)
+
+    def test_radd_float(self):
+        result = 1.0 + self.jd
+        assert isinstance(result, JulianDate)
+        assert result.jd == J2000 + 1.0
+
+    def test_sub_float(self):
+        result = self.jd - 1.0
+        assert isinstance(result, JulianDate)
+        assert result.jd == J2000 - 1.0
+
+    def test_sub_timedelta(self):
+        result = self.jd - timedelta(days=1)
+        assert math.isclose(result.jd, J2000 - 1.0, abs_tol=1e-10)
+
+    def test_sub_julian_date_returns_float(self):
+        other = JulianDate(J2000 - 1.0)
+        diff = self.jd - other
+        assert isinstance(diff, float)
+        assert math.isclose(diff, 1.0, abs_tol=1e-10)
+
+    def test_rsub_float(self):
+        result = (J2000 + 1.0) - self.jd
+        assert isinstance(result, JulianDate)
+        assert math.isclose(result.jd, 1.0, abs_tol=1e-10)
+
+    def test_add_unsupported_type_returns_not_implemented(self):
+        assert self.jd.__add__("oops") is NotImplemented
+
+    def test_sub_unsupported_type_returns_not_implemented(self):
+        assert self.jd.__sub__("oops") is NotImplemented
+
+
+class TestJulianDateComparison:
+    def setup_method(self):
+        self.a = JulianDate(J2000)
+        self.b = JulianDate(J2000 + 1.0)
+        self.same = JulianDate(J2000)
+
+    def test_eq_same_value(self):
+        assert self.a == self.same
+
+    def test_eq_different_value(self):
+        assert not (self.a == self.b)
+
+    def test_ne(self):
+        assert self.a != self.b
+
+    def test_lt(self):
+        assert self.a < self.b
+        assert not (self.b < self.a)
+
+    def test_le_less(self):
+        assert self.a <= self.b
+
+    def test_le_equal(self):
+        assert self.a <= self.same
+
+    def test_gt(self):
+        assert self.b > self.a
+        assert not (self.a > self.b)
+
+    def test_ge_greater(self):
+        assert self.b >= self.a
+
+    def test_ge_equal(self):
+        assert self.a >= self.same
+
+    def test_eq_float(self):
+        assert self.a == J2000
+
+    def test_lt_float(self):
+        assert self.a < J2000 + 1.0
+
+    def test_gt_float(self):
+        assert self.b > J2000
+
+    def test_eq_unsupported_type(self):
+        assert self.a.__eq__("nope") is NotImplemented
+
+
+class TestJulianDateHashing:
+    def test_hashable(self):
+        jd = JulianDate(J2000)
+        assert isinstance(hash(jd), int)
+
+    def test_usable_as_dict_key(self):
+        jd = JulianDate(J2000)
+        d = {jd: "epoch"}
+        assert d[jd] == "epoch"
+
+    def test_usable_in_set(self):
+        s = {JulianDate(J2000), JulianDate(J2000 + 1), JulianDate(J2000)}
+        assert len(s) == 2
+
+    def test_equal_objects_same_hash(self):
+        a = JulianDate(J2000)
+        b = JulianDate(J2000)
+        assert hash(a) == hash(b)
+
+
+class TestJulianDateHelpers:
+    def setup_method(self):
+        self.earlier = JulianDate(J2000)
+        self.later = JulianDate(J2000 + 1.0)
+
+    def test_approx_eq_within_tolerance(self):
+        almost = JulianDate(J2000 + 0.5 / 86400.0)  # 0.5 s later
+        assert self.earlier.approx_eq(almost, tol_seconds=1.0)
+
+    def test_approx_eq_outside_tolerance(self):
+        far = JulianDate(J2000 + 2.0 / 86400.0)  # 2 s later
+        assert not self.earlier.approx_eq(far, tol_seconds=1.0)
+
+    def test_days_since(self):
+        assert math.isclose(self.later.days_since(self.earlier), 1.0, abs_tol=1e-10)
+
+    def test_seconds_since(self):
+        assert math.isclose(self.later.seconds_since(self.earlier), 86400.0, abs_tol=1e-4)
+
+    def test_days_since_negative(self):
+        assert math.isclose(self.earlier.days_since(self.later), -1.0, abs_tol=1e-10)
