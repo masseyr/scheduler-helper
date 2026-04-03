@@ -12,6 +12,7 @@ dependencies = ["numpy"]
 [project.optional-dependencies]
 dev = ["pytest", "pytest-cov"]
 validation = ["sgp4", "astropy"]
+viz = ["plotly"]
 
 [project.scripts]
 tasking-helper = "tasking_helper.__main__:main"
