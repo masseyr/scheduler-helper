@@ -13,6 +13,7 @@ dependencies = ["numpy"]
 dev = ["pytest", "pytest-cov"]
 validation = ["sgp4", "astropy"]
 viz = ["plotly"]
+gui = ["PyQt6", "matplotlib"]
 
 [project.scripts]
 tasking-helper = "tasking_helper.__main__:main"
