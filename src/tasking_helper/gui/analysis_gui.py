@@ -4,7 +4,7 @@ tasking_helper/gui/analysis_gui.py
 PyQt6 GUI — EO ground-station sensor analysis.
 
 Propagates a Keplerian orbit, computes visibility windows, SNR, and visual
-magnitude for an electro-optical ground sensor tracking a space object.
+magnitude for one or more electro-optical ground sensors tracking a space object.
 
 Run standalone:
     python -m tasking_helper.gui.analysis_gui
@@ -17,24 +17,24 @@ from __future__ import annotations
 
 import sys
 import math
-from typing import Any
 
 import numpy as np
 from PyQt6.QtCore import QObject, QThread, pyqtSignal, Qt
 from PyQt6.QtGui import QFont, QPalette, QColor, QLinearGradient, QPainter, QBrush
 from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QTabWidget,
-    QVBoxLayout, QHBoxLayout, QGroupBox, QFormLayout,
-    QDoubleSpinBox, QLabel, QPushButton, QProgressBar,
-    QScrollArea, QSplitter, QStatusBar, QMessageBox,
-    QSizePolicy,
+    QAbstractItemView, QApplication, QCheckBox, QDoubleSpinBox, QFileDialog,
+    QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
+    QMainWindow, QMessageBox, QPushButton, QProgressBar,
+    QScrollArea, QSizePolicy, QSplitter, QTableWidget, QTableWidgetItem,
+    QTabWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
 
-# ─── parameter groups ─────────────────────────────────────────────────────────
-# Each parameter: (key, label, default, lo, hi, decimals, step, unit, tooltip)
-_PARAM_GROUPS: list[tuple[str, list]] = [
+# ─── scene / sensor parameter specs ──────────────────────────────────────────
+# Each entry: (key, label, default, lo, hi, decimals, step, unit, tooltip)
+
+_SCENE_PARAM_GROUPS: list[tuple[str, list]] = [
     ("Orbit (observed object)", [
         ("alt_km",   "Altitude",          550.0,  160.0, 36000.0, 1,  10.0, "km",
          "Mean orbital altitude above Earth's surface"),
@@ -65,26 +65,6 @@ _PARAM_GROUPS: list[tuple[str, list]] = [
         ("min_el_deg",  "Min. Elevation", 10.0,   0.0,   90.0,  1,  1.0, "deg",
          "Minimum elevation angle for a visible pass"),
     ]),
-    ("Sensor", [
-        ("aperture_m",   "Aperture",      0.50,  0.01,    5.0, 3, 0.05, "m",
-         "Lens / mirror clear aperture diameter"),
-        ("focal_len_mm", "Focal Length",  2000.0, 50.0, 20000.0, 0, 100.0, "mm",
-         "Effective focal length"),
-        ("pixel_um",     "Pixel Pitch",   6.5,   1.0,   50.0, 2,  0.5, "µm",
-         "Detector pixel pitch"),
-        ("exposure_s",   "Exposure",      0.01, 1e-5,   10.0, 4, 0.005, "s",
-         "Single-frame integration time"),
-        ("qe",           "Quantum Eff.",  0.80,  0.05,   1.0, 2, 0.05, "",
-         "Detector quantum efficiency"),
-        ("read_noise_e", "Read Noise",    5.0,   0.0,  200.0, 1,  1.0, "e⁻",
-         "RMS read noise per pixel"),
-        ("snr_threshold","SNR Threshold", 5.0,   1.0,  100.0, 1,  0.5, "",
-         "Minimum SNR required for detection"),
-        ("vizmag_limit", "Vmag Limit",   14.0,   5.0,   25.0, 1,  0.5, "mag",
-         "Faint limiting visual magnitude of the sensor"),
-        ("loop_gain_db", "Loop Gain",    20.0,   0.0,   60.0, 1,  1.0, "dB",
-         "Optical / electronic loop gain applied to signal"),
-    ]),
     ("Simulation", [
         ("duration_min", "Duration",     120.0,  10.0, 1440.0, 0,  10.0, "min",
          "Total simulation duration"),
@@ -93,20 +73,117 @@ _PARAM_GROUPS: list[tuple[str, list]] = [
     ]),
 ]
 
+# Each entry: (key, label, default, lo, hi, decimals, step, unit, tooltip)
+_SENSOR_TYPE_DEFS: dict[str, dict] = {
+    "Ground Optical": {
+        "params": [
+            ("aperture_m",    "Aperture",      0.50,  0.01,    5.0, 3, 0.05, "m",
+             "Lens / mirror clear aperture diameter"),
+            ("focal_len_mm",  "Focal Length",  2000.0, 50.0, 20000.0, 0, 100.0, "mm",
+             "Effective focal length"),
+            ("pixel_um",      "Pixel Pitch",    6.5,   1.0,   50.0, 2,  0.5, "µm",
+             "Detector pixel pitch"),
+            ("exposure_s",    "Exposure",       0.01,  1e-5,  10.0, 4, 0.005, "s",
+             "Single-frame integration time"),
+            ("qe",            "Quantum Eff.",   0.80,  0.05,   1.0, 2,  0.05, "",
+             "Detector quantum efficiency"),
+            ("read_noise_e",  "Read Noise",     5.0,   0.0,  200.0, 1,  1.0, "e⁻",
+             "RMS read noise per pixel"),
+            ("snr_threshold", "SNR Threshold",  5.0,   1.0,  100.0, 1,  0.5, "",
+             "Minimum SNR required for detection"),
+            ("vizmag_limit",  "Vmag Limit",    14.0,   5.0,   25.0, 1,  0.5, "mag",
+             "Faint limiting visual magnitude of the sensor"),
+            ("loop_gain_db",  "Loop Gain",     20.0,   0.0,   60.0, 1,  1.0, "dB",
+             "Optical / electronic loop gain applied to signal"),
+        ],
+    },
+    "Radar": {
+        "params": [
+            ("freq_ghz",      "Frequency",     10.0,   0.1,  100.0, 1,  1.0, "GHz",
+             "Carrier frequency"),
+            ("power_kw",      "Peak Power",   100.0,   0.1, 10000.0, 0, 10.0, "kW",
+             "Peak transmit power"),
+            ("ant_gain_db",   "Antenna Gain",  30.0,   0.0,   60.0, 1,  1.0, "dBi",
+             "Transmit/receive antenna gain"),
+            ("pulse_us",      "Pulse Width",    1.0,   0.001, 10000.0, 3, 0.1, "µs",
+             "Transmitted pulse width"),
+            ("prf_hz",        "PRF",         1000.0,   1.0,  1e6,  0, 100.0, "Hz",
+             "Pulse repetition frequency"),
+            ("noise_fig_db",  "Noise Figure",   3.0,   0.0,   20.0, 1,  0.5, "dB",
+             "Receiver noise figure"),
+            ("n_pulses",      "Pulses Integrated", 10.0, 1.0, 10000.0, 0, 1.0, "",
+             "Number of coherently integrated pulses"),
+            ("losses_db",     "System Losses",  3.0,   0.0,   30.0, 1,  0.5, "dB",
+             "Total system losses"),
+            ("snr_threshold", "SNR Threshold", 13.0,  -20.0,  40.0, 1,  0.5, "dB",
+             "Minimum SNR (dB) required for detection"),
+        ],
+    },
+    "Space Optical": {
+        "params": [
+            ("aperture_m",    "Aperture",      0.30,  0.01,    5.0, 3, 0.05, "m",
+             "Lens / mirror clear aperture diameter"),
+            ("focal_len_mm",  "Focal Length",  1500.0, 50.0, 20000.0, 0, 100.0, "mm",
+             "Effective focal length"),
+            ("pixel_um",      "Pixel Pitch",    7.0,   1.0,   50.0, 2,  0.5, "µm",
+             "Detector pixel pitch"),
+            ("exposure_s",    "Exposure",       0.001, 1e-5,   1.0, 4, 0.001, "s",
+             "Single-frame integration time"),
+            ("qe",            "Quantum Eff.",   0.75,  0.05,   1.0, 2,  0.05, "",
+             "Detector quantum efficiency"),
+            ("read_noise_e",  "Read Noise",    20.0,   0.0,  500.0, 0,  5.0, "e⁻",
+             "RMS read noise per pixel"),
+            ("snr_threshold", "SNR Threshold",  5.0,   1.0,  100.0, 1,  0.5, "",
+             "Minimum SNR required for detection"),
+            ("vizmag_limit",  "Vmag Limit",    14.0,   5.0,   25.0, 1,  0.5, "mag",
+             "Faint limiting visual magnitude of the sensor"),
+            ("loop_gain_db",  "Loop Gain",      0.0,   0.0,   40.0, 1,  1.0, "dB",
+             "Optical / electronic loop gain applied to signal"),
+            ("sensor_alt_km", "Sensor Altitude", 500.0, 200.0, 36000.0, 0, 10.0, "km",
+             "Sensor spacecraft orbital altitude"),
+            ("sensor_incl_deg", "Sensor Incl.", 98.0,  0.0,  180.0, 1,  1.0, "deg",
+             "Sensor spacecraft orbital inclination"),
+        ],
+    },
+}
+
+_SENSOR_TYPE_NAMES = list(_SENSOR_TYPE_DEFS.keys())
+
+# Columns shown in the Sensors overview table
+_SENSOR_TABLE_COLS: list[tuple[str, str]] = [
+    ("name",          "Name"),
+    ("sensor_type",   "Type"),
+    ("snr_threshold", "SNR thr."),
+]
+
+# Per-sensor plot colours (cycles if more sensors than colours)
+_SENSOR_COLORS = [
+    "#2196F3", "#FF9800", "#4CAF50", "#E91E63",
+    "#9C27B0", "#00BCD4", "#FF5722", "#795548",
+]
+
+
+def _default_sensor(name: str = "Sensor 1",
+                    sensor_type: str = "Ground Optical") -> dict:
+    d: dict = {"name": name, "sensor_type": sensor_type}
+    for key, _, default, *_ in _SENSOR_TYPE_DEFS[sensor_type]["params"]:
+        d[key] = float(default)
+    return d
+
+
 # ─── physics / orbital mechanics ─────────────────────────────────────────────
 
-_MU_KM3_S2 = 398_600.4418       # Earth GM [km³/s²]
-_R_E_KM    = 6_378.137          # Earth equatorial radius [km]
+_MU_KM3_S2 = 398_600.4418
+_R_E_KM    = 6_378.137
 _E2_WGS84  = 0.006_694_379_990_14
-_F_SUN     = 1_361.0            # Solar irradiance [W/m²]
-_H_PLANCK  = 6.626e-34          # J·s
-_C_LIGHT   = 3.0e8              # m/s
-_LAM_VIS   = 550e-9             # reference wavelength (green) [m]
-_F_VEGA_V  = 3.64e-9            # V-band Vega flux [W/m²]   (zero-point)
+_F_SUN     = 1_361.0
+_H_PLANCK  = 6.626e-34
+_C_LIGHT   = 3.0e8
+_LAM_VIS   = 550e-9
+_F_VEGA_V  = 3.64e-9
 
 
 def _kepler_solve(M: float, e: float, tol: float = 1e-12) -> float:
-    """Newton–Raphson solution of Kepler's equation M = E − e·sin E."""
     E = M + e * math.sin(M) * (1.0 + e * math.cos(M))
     for _ in range(50):
         dE = (M - E + e * math.sin(E)) / (1.0 - e * math.cos(E))
@@ -117,27 +194,19 @@ def _kepler_solve(M: float, e: float, tol: float = 1e-12) -> float:
 
 
 def _keplerian_pos_eci(
-    a: float, e: float, i: float, raan: float, argp: float, M: float
+    a: float, e: float, i: float, raan: float, argp: float, M: float,
 ) -> np.ndarray:
-    """
-    Return ECI position [km] from Keplerian elements.
-
-    All angles in radians; a in km.
-    """
     E  = _kepler_solve(M, e)
     nu = 2.0 * math.atan2(
         math.sqrt(1 + e) * math.sin(E / 2),
         math.sqrt(1 - e) * math.cos(E / 2),
     )
-    r = a * (1.0 - e * math.cos(E))
-
+    r  = a * (1.0 - e * math.cos(E))
     xo = r * math.cos(nu)
     yo = r * math.sin(nu)
-
     ci, si = math.cos(i),    math.sin(i)
     cr, sr = math.cos(raan), math.sin(raan)
     cw, sw = math.cos(argp), math.sin(argp)
-
     x = (cr * cw - sr * sw * ci) * xo + (-cr * sw - sr * cw * ci) * yo
     y = (sr * cw + cr * sw * ci) * xo + (-sr * sw + cr * cw * ci) * yo
     z = (sw * si)                * xo + (cw * si)                 * yo
@@ -145,34 +214,29 @@ def _keplerian_pos_eci(
 
 
 def _gmst_rad(t_sec: float) -> float:
-    """Approximate Greenwich Mean Sidereal Time [rad] at t seconds after J2000."""
     return math.radians((280.460_618_37 + 360.985_647_24 * t_sec / 86_400.0) % 360.0)
 
 
 def _lla_to_eci(lat_deg: float, lon_deg: float, alt_m: float, t_sec: float) -> np.ndarray:
-    """Geodetic lat/lon/alt → ECI [km] at time t_sec past J2000."""
-    lat = math.radians(lat_deg)
-    lon = math.radians(lon_deg)
+    lat    = math.radians(lat_deg)
+    lon    = math.radians(lon_deg)
     alt_km = alt_m / 1_000.0
-
-    N = _R_E_KM / math.sqrt(1.0 - _E2_WGS84 * math.sin(lat) ** 2)
+    N  = _R_E_KM / math.sqrt(1.0 - _E2_WGS84 * math.sin(lat) ** 2)
     xe = (N + alt_km) * math.cos(lat) * math.cos(lon)
     ye = (N + alt_km) * math.cos(lat) * math.sin(lon)
     ze = (N * (1.0 - _E2_WGS84) + alt_km) * math.sin(lat)
-
     th = _gmst_rad(t_sec)
-    x = xe * math.cos(th) - ye * math.sin(th)
-    y = xe * math.sin(th) + ye * math.cos(th)
-    return np.array([x, y, ze])
+    return np.array([xe * math.cos(th) - ye * math.sin(th),
+                     xe * math.sin(th) + ye * math.cos(th),
+                     ze])
 
 
-def _elevation_range(obs_eci: np.ndarray, sat_eci: np.ndarray,
-                     lat_deg: float, lon_deg: float, t_sec: float
-                     ) -> tuple[float, float]:
-    """Return (elevation_deg, range_km) of satellite from observer."""
-    diff      = sat_eci - obs_eci
-    range_km  = float(np.linalg.norm(diff))
-
+def _elevation_range(
+    obs_eci: np.ndarray, sat_eci: np.ndarray,
+    lat_deg: float, lon_deg: float, t_sec: float,
+) -> tuple[float, float]:
+    diff     = sat_eci - obs_eci
+    range_km = float(np.linalg.norm(diff))
     lat  = math.radians(lat_deg)
     th   = _gmst_rad(t_sec) + math.radians(lon_deg)
     up   = np.array([math.cos(lat) * math.cos(th),
@@ -184,7 +248,6 @@ def _elevation_range(obs_eci: np.ndarray, sat_eci: np.ndarray,
 
 
 def _sun_dir_eci(t_sec: float) -> np.ndarray:
-    """Approximate unit vector from Earth to Sun in ECI frame."""
     T   = t_sec / (86_400.0 * 365.25)
     L   = math.radians(280.460 + 36_000.771 * T)
     M   = math.radians(357.528 + 35_999.050 * T)
@@ -196,66 +259,70 @@ def _sun_dir_eci(t_sec: float) -> np.ndarray:
 
 
 def _is_illuminated(sat_eci: np.ndarray, sun_dir: np.ndarray) -> bool:
-    """True if satellite is outside Earth's geometric shadow (cylinder approx)."""
     proj = float(np.dot(sat_eci, sun_dir))
     if proj > 0.0:
         return True
-    perp = np.linalg.norm(sat_eci - proj * sun_dir)
-    return perp > _R_E_KM
+    return np.linalg.norm(sat_eci - proj * sun_dir) > _R_E_KM
 
 
 def _compute_snr(
-    range_km: float,
-    target_diam_m: float,
-    albedo: float,
-    aperture_m: float,
-    exposure_s: float,
-    qe: float,
-    read_noise_e: float,
-    loop_gain_db: float,
+    range_km: float, target_diam_m: float, albedo: float,
+    aperture_m: float, exposure_s: float, qe: float,
+    read_noise_e: float, loop_gain_db: float,
 ) -> float:
-    """Signal-to-noise ratio for reflected solar light (Lambertian reflector)."""
-    range_m     = range_km * 1_000.0
-    target_area = math.pi * (target_diam_m / 2.0) ** 2
-    aperture_area = math.pi * (aperture_m / 2.0) ** 2
-
-    # Flux at sensor from Lambertian sphere
-    flux = _F_SUN * albedo * target_area / (math.pi * range_m ** 2)
-
-    # Loop (electronic/optical) gain
-    gain = 10.0 ** (loop_gain_db / 10.0)
-
-    # Signal electrons
-    photon_rate = flux * _LAM_VIS / (_H_PLANCK * _C_LIGHT)
-    sig_e = photon_rate * aperture_area * qe * exposure_s * gain
-
-    noise = math.sqrt(max(sig_e, 0.0) + read_noise_e ** 2)
+    range_m       = range_km * 1_000.0
+    target_area   = math.pi * (target_diam_m / 2.0) ** 2
+    aperture_area = math.pi * (aperture_m    / 2.0) ** 2
+    flux          = _F_SUN * albedo * target_area / (math.pi * range_m ** 2)
+    gain          = 10.0 ** (loop_gain_db / 10.0)
+    sig_e         = (flux * _LAM_VIS / (_H_PLANCK * _C_LIGHT)) * aperture_area * qe * exposure_s * gain
+    noise         = math.sqrt(max(sig_e, 0.0) + read_noise_e ** 2)
     return sig_e / noise if noise > 0 else 0.0
 
 
 def _compute_vizmag(range_km: float, target_diam_m: float, albedo: float) -> float:
-    """Approximate visual magnitude of reflected-light target."""
     range_m     = range_km * 1_000.0
     target_area = math.pi * (target_diam_m / 2.0) ** 2
     flux = _F_SUN * albedo * target_area / (math.pi * range_m ** 2)
-    if flux <= 0:
-        return 30.0
-    return -2.5 * math.log10(flux / _F_VEGA_V)
+    return -2.5 * math.log10(flux / _F_VEGA_V) if flux > 0 else 30.0
+
+
+_K_BOLTZ = 1.38e-23
+
+
+def _compute_snr_radar(
+    range_km: float, target_diam_m: float,
+    freq_ghz: float, power_kw: float, ant_gain_db: float,
+    pulse_us: float, noise_fig_db: float, n_pulses: float, losses_db: float,
+) -> float:
+    """Radar range equation; returns SNR in dB."""
+    lam    = 3e8 / (freq_ghz * 1e9)
+    Pt     = power_kw * 1e3
+    G      = 10.0 ** (ant_gain_db  / 10.0)
+    F      = 10.0 ** (noise_fig_db / 10.0)
+    L      = 10.0 ** (losses_db    / 10.0)
+    rcs    = math.pi * (target_diam_m / 2.0) ** 2
+    R      = range_km * 1e3
+    bw     = 1.0 / max(pulse_us * 1e-6, 1e-12)
+    N      = max(1.0, n_pulses)
+    snr_lin = (Pt * G ** 2 * lam ** 2 * rcs * N) / (
+        (4.0 * math.pi) ** 3 * R ** 4 * _K_BOLTZ * 290.0 * bw * F * L
+    )
+    return 10.0 * math.log10(max(snr_lin, 1e-30))
 
 
 # ─── analysis worker ──────────────────────────────────────────────────────────
 
 class AnalysisWorker(QObject):
-    """Runs the orbit propagation and analysis in a background QThread."""
-
-    progress = pyqtSignal(int, str)   # (percent 0-100, status message)
-    finished = pyqtSignal(dict)        # results dict
+    progress = pyqtSignal(int, str)
+    finished = pyqtSignal(dict)
     error    = pyqtSignal(str)
 
-    def __init__(self, params: dict[str, float]) -> None:
+    def __init__(self, scene_params: dict, sensors: list[dict]) -> None:
         super().__init__()
-        self.params     = params
-        self._cancelled = False
+        self.scene_params = scene_params
+        self.sensors      = sensors
+        self._cancelled   = False
 
     def cancel(self) -> None:
         self._cancelled = True
@@ -268,101 +335,124 @@ class AnalysisWorker(QObject):
         except Exception as exc:
             self.error.emit(f"{type(exc).__name__}: {exc}")
 
-    # ── core analysis ────────────────────────────────────────────────────────
-
     def _analyse(self) -> dict:
-        p = self.params
+        p = self.scene_params
         self.progress.emit(0, "Setting up orbit…")
 
-        # Orbital parameters
-        a_km   = _R_E_KM + p["alt_km"]                  # semi-major axis [km]
-        e      = p["ecc"]
-        i      = math.radians(p["incl_deg"])
-        raan   = math.radians(p["raan_deg"])
-        argp   = math.radians(p["argp_deg"])
-        M0     = math.radians(p["m0_deg"])
-
-        # Mean motion [rad/s]
-        n = math.sqrt(_MU_KM3_S2 / a_km ** 3)
+        a_km = _R_E_KM + p["alt_km"]
+        e    = p["ecc"]
+        i    = math.radians(p["incl_deg"])
+        raan = math.radians(p["raan_deg"])
+        argp = math.radians(p["argp_deg"])
+        M0   = math.radians(p["m0_deg"])
+        n    = math.sqrt(_MU_KM3_S2 / a_km ** 3)
 
         duration_s = p["duration_min"] * 60.0
         step_s     = p["step_sec"]
         n_steps    = int(duration_s / step_s) + 1
         times      = np.arange(n_steps) * step_s
 
-        # Result arrays
-        elevations = np.full(n_steps, np.nan)
-        ranges     = np.full(n_steps, np.nan)
-        snrs       = np.full(n_steps, np.nan)
-        vmags      = np.full(n_steps, np.nan)
-        visible    = np.zeros(n_steps, dtype=bool)
-        lats       = np.full(n_steps, np.nan)
-        lons_gt    = np.full(n_steps, np.nan)
+        # Shared geometry arrays (same for every sensor)
+        elevations  = np.full(n_steps, np.nan)
+        ranges      = np.full(n_steps, np.nan)
+        lats        = np.full(n_steps, np.nan)
+        lons_gt     = np.full(n_steps, np.nan)
         illuminated = np.zeros(n_steps, dtype=bool)
 
-        progress_every = max(1, n_steps // 100)
+        progress_every = max(1, n_steps // 80)
 
+        self.progress.emit(2, "Propagating orbit…")
         for idx, t in enumerate(times):
             if self._cancelled:
                 break
-
             if idx % progress_every == 0:
-                pct = int(idx / n_steps * 95)
-                self.progress.emit(pct, f"Propagating… step {idx}/{n_steps}")
+                pct = 2 + int(idx / n_steps * 45)
+                self.progress.emit(pct, f"Propagating orbit… {idx}/{n_steps}")
 
-            M = M0 + n * t
+            M       = M0 + n * t
             sat_eci = _keplerian_pos_eci(a_km, e, i, raan, argp, M)
-            obs_eci = _lla_to_eci(p["obs_lat_deg"], p["obs_lon_deg"],
-                                   p["obs_alt_m"], t)
+            obs_eci = _lla_to_eci(p["obs_lat_deg"], p["obs_lon_deg"], p["obs_alt_m"], t)
+            el, rng = _elevation_range(obs_eci, sat_eci, p["obs_lat_deg"], p["obs_lon_deg"], t)
 
-            el, rng = _elevation_range(obs_eci, sat_eci,
-                                        p["obs_lat_deg"], p["obs_lon_deg"], t)
             elevations[idx] = el
             ranges[idx]     = rng
+            illuminated[idx] = _is_illuminated(sat_eci, _sun_dir_eci(t))
 
-            sun_dir = _sun_dir_eci(t)
-            illum   = _is_illuminated(sat_eci, sun_dir)
-            illuminated[idx] = illum
-
-            if el >= p["min_el_deg"] and illum:
-                snr = _compute_snr(
-                    rng, p["target_diam_m"], p["albedo"],
-                    p["aperture_m"], p["exposure_s"], p["qe"],
-                    p["read_noise_e"], p["loop_gain_db"],
-                )
-                vm  = _compute_vizmag(rng, p["target_diam_m"], p["albedo"])
-                snrs[idx]  = snr
-                vmags[idx] = vm
-                visible[idx] = (snr >= p["snr_threshold"]
-                                and vm <= p["vizmag_limit"])
-
-            # Ground track sub-satellite point (ECEF → lat/lon)
             r_mag = np.linalg.norm(sat_eci)
-            th = _gmst_rad(t)
-            xe =  sat_eci[0] * math.cos(th) + sat_eci[1] * math.sin(th)
-            ye = -sat_eci[0] * math.sin(th) + sat_eci[1] * math.cos(th)
-            ze =  sat_eci[2]
-            lats[idx]    = math.degrees(math.asin(ze / r_mag))
+            th    = _gmst_rad(t)
+            xe    =  sat_eci[0] * math.cos(th) + sat_eci[1] * math.sin(th)
+            ye    = -sat_eci[0] * math.sin(th) + sat_eci[1] * math.cos(th)
+            lats[idx]    = math.degrees(math.asin(sat_eci[2] / r_mag))
             lons_gt[idx] = math.degrees(math.atan2(ye, xe))
 
-        self.progress.emit(97, "Collating results…")
-        times_min = times / 60.0
+        # Per-sensor analysis
+        above_min = elevations >= p["min_el_deg"]
+        sensor_results: list[dict] = []
+        n_sensors = len(self.sensors)
 
+        for s_idx, sensor in enumerate(self.sensors):
+            if self._cancelled:
+                break
+            base_pct = 48 + int(s_idx / n_sensors * 47)
+            self.progress.emit(base_pct, f"Analysing {sensor['name']}…")
+
+            snrs    = np.full(n_steps, np.nan)
+            vmags   = np.full(n_steps, np.nan)
+            visible = np.zeros(n_steps, dtype=bool)
+            stype   = sensor.get("sensor_type", "Ground Optical")
+            is_radar = stype == "Radar"
+
+            for idx in range(n_steps):
+                if not above_min[idx]:
+                    continue
+                if not is_radar and not illuminated[idx]:
+                    continue
+                rng = float(ranges[idx])
+                if is_radar:
+                    snr = _compute_snr_radar(
+                        rng, p["target_diam_m"],
+                        sensor["freq_ghz"], sensor["power_kw"],
+                        sensor["ant_gain_db"], sensor["pulse_us"],
+                        sensor["noise_fig_db"], sensor["n_pulses"],
+                        sensor["losses_db"],
+                    )
+                    snrs[idx]    = snr
+                    visible[idx] = snr >= sensor["snr_threshold"]
+                else:
+                    snr = _compute_snr(
+                        rng, p["target_diam_m"], p["albedo"],
+                        sensor["aperture_m"], sensor["exposure_s"],
+                        sensor["qe"], sensor["read_noise_e"],
+                        sensor["loop_gain_db"],
+                    )
+                    vm = _compute_vizmag(rng, p["target_diam_m"], p["albedo"])
+                    snrs[idx]    = snr
+                    vmags[idx]   = vm
+                    visible[idx] = (snr >= sensor["snr_threshold"]
+                                    and vm <= sensor.get("vizmag_limit", 99.0))
+
+            sensor_results.append(dict(
+                name    = sensor["name"],
+                snrs    = snrs,
+                vmags   = vmags,
+                visible = visible,
+                params  = dict(sensor),
+            ))
+
+        self.progress.emit(97, "Collating results…")
         return dict(
-            times_min   = times_min,
+            times_min   = times / 60.0,
             elevations  = elevations,
             ranges      = ranges,
-            snrs        = snrs,
-            vmags       = vmags,
-            visible     = visible,
-            illuminated = illuminated,
             lats        = lats,
             lons_gt     = lons_gt,
-            params      = p,
+            illuminated = illuminated,
+            scene_params = p,
+            sensors     = sensor_results,
         )
 
 
-# ─── parameter panel ──────────────────────────────────────────────────────────
+# ─── shared UI helpers ────────────────────────────────────────────────────────
 
 class _UnitLabel(QLabel):
     def __init__(self, text: str) -> None:
@@ -371,51 +461,122 @@ class _UnitLabel(QLabel):
         self.setStyleSheet("color: #888; font-size: 11px;")
 
 
-class ParameterPanel(QScrollArea):
-    """Scrollable panel with grouped parameter spinboxes."""
+def _make_param_form(
+    params: list[tuple],
+    spinboxes: dict,
+    changed_slot=None,
+) -> QGroupBox | QWidget:
+    """Build a QFormLayout from a params list, store spinboxes in *spinboxes* dict."""
+    container = QWidget()
+    form = QFormLayout(container)
+    form.setSpacing(4)
+    form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+    form.setContentsMargins(0, 0, 0, 0)
+
+    for key, label, default, lo, hi, dec, step, unit, tip in params:
+        sb = QDoubleSpinBox()
+        sb.setRange(lo, hi)
+        sb.setDecimals(dec)
+        sb.setSingleStep(step)
+        sb.setValue(default)
+        sb.setToolTip(tip)
+        sb.setMinimumWidth(110)
+        if changed_slot is not None:
+            sb.valueChanged.connect(changed_slot)
+
+        row = QWidget()
+        hl  = QHBoxLayout(row)
+        hl.setContentsMargins(0, 0, 0, 0)
+        hl.addWidget(sb)
+        if unit:
+            hl.addWidget(_UnitLabel(unit))
+        hl.addStretch()
+
+        form.addRow(label, row)
+        spinboxes[key] = sb
+
+    return container
+
+
+# ─── scene / orbit parameter panel ───────────────────────────────────────────
+
+# Mapping from _SCENE_PARAM_GROUPS display name → config file section name
+_SCENE_CONFIG_SECTIONS: dict[str, str] = {
+    g: g.split("(")[0].strip().replace(" / ", " ").rstrip()
+    for g, _ in _SCENE_PARAM_GROUPS
+}
+# e.g. "Orbit (observed object)" → "Orbit"
+#      "Observer / Location"     → "Observer  Location" → we clean up below
+_SCENE_CONFIG_SECTIONS = {
+    g: g.split("(")[0].strip().replace(" / ", "_")
+    for g, _ in _SCENE_PARAM_GROUPS
+}
+
+
+class ParameterPanel(QWidget):
+    """
+    Scrollable panel for orbit / target / observer / simulation parameters.
+    Includes Export / Import buttons to persist settings as a .config file.
+    """
+
+    _CONFIG_VERSION = "1"
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWidgetResizable(True)
-        self.setMinimumWidth(340)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        inner = QWidget()
+        # ── toolbar ──────────────────────────────────────────────────────────
+        toolbar = QWidget()
+        toolbar.setFixedHeight(32)
+        toolbar.setStyleSheet("background:#f0f4ff; border-bottom:1px solid #d0d8f0;")
+        tb_layout = QHBoxLayout(toolbar)
+        tb_layout.setContentsMargins(6, 3, 6, 3)
+        tb_layout.setSpacing(6)
+
+        lbl = QLabel("Scene parameters")
+        lbl.setStyleSheet("font-weight:bold; font-size:11px; color:#444;")
+
+        self._export_btn = QPushButton("↑ Export .config")
+        self._import_btn = QPushButton("↓ Import .config")
+        for b in (self._export_btn, self._import_btn):
+            b.setFixedHeight(24)
+            b.setStyleSheet(_BTN_STYLE)
+
+        self._export_btn.clicked.connect(self._export_config)
+        self._import_btn.clicked.connect(self._import_config)
+
+        tb_layout.addWidget(lbl)
+        tb_layout.addStretch()
+        tb_layout.addWidget(self._export_btn)
+        tb_layout.addWidget(self._import_btn)
+        root.addWidget(toolbar)
+
+        # ── scrollable form ───────────────────────────────────────────────────
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setMinimumWidth(340)
+
+        inner  = QWidget()
         layout = QVBoxLayout(inner)
         layout.setSpacing(8)
         layout.setContentsMargins(6, 6, 6, 6)
 
         self._spinboxes: dict[str, QDoubleSpinBox] = {}
 
-        for group_name, params in _PARAM_GROUPS:
+        for group_name, params in _SCENE_PARAM_GROUPS:
             box = QGroupBox(group_name)
-            form = QFormLayout(box)
-            form.setSpacing(4)
-            form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-
-            for key, label, default, lo, hi, dec, step, unit, tip in params:
-                sb = QDoubleSpinBox()
-                sb.setRange(lo, hi)
-                sb.setDecimals(dec)
-                sb.setSingleStep(step)
-                sb.setValue(default)
-                sb.setToolTip(tip)
-                sb.setMinimumWidth(110)
-
-                row = QWidget()
-                hl  = QHBoxLayout(row)
-                hl.setContentsMargins(0, 0, 0, 0)
-                hl.addWidget(sb)
-                if unit:
-                    hl.addWidget(_UnitLabel(unit))
-                hl.addStretch()
-
-                form.addRow(label, row)
-                self._spinboxes[key] = sb
-
+            vl  = QVBoxLayout(box)
+            vl.setContentsMargins(6, 4, 6, 4)
+            vl.addWidget(_make_param_form(params, self._spinboxes))
             layout.addWidget(box)
 
         layout.addStretch()
-        self.setWidget(inner)
+        scroll.setWidget(inner)
+        root.addWidget(scroll)
+
+    # ── data access ──────────────────────────────────────────────────────────
 
     def get_params(self) -> dict[str, float]:
         return {k: sb.value() for k, sb in self._spinboxes.items()}
@@ -423,135 +584,645 @@ class ParameterPanel(QScrollArea):
     def set_params(self, params: dict[str, float]) -> None:
         for k, v in params.items():
             if k in self._spinboxes:
-                self._spinboxes[k].setValue(v)
+                sb = self._spinboxes[k]
+                sb.setValue(max(sb.minimum(), min(sb.maximum(), v)))
+
+    # ── config export ─────────────────────────────────────────────────────────
+
+    def _export_config(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export scene config", "scene.config",
+            "Config files (*.config);;All files (*)")
+        if not path:
+            return
+        import configparser, datetime
+        cfg = configparser.ConfigParser()
+        cfg["Metadata"] = {
+            "version":   self._CONFIG_VERSION,
+            "exported":  datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "generator": "tasking_helper.gui",
+        }
+        for group_name, params in _SCENE_PARAM_GROUPS:
+            section = _SCENE_CONFIG_SECTIONS[group_name]
+            cfg[section] = {
+                key: repr(self._spinboxes[key].value())
+                for key, *_ in params
+            }
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                cfg.write(fh)
+            print(f"Exported scene config → {path}")
+        except OSError as exc:
+            QMessageBox.critical(self, "Export failed", str(exc))
+
+    # ── config import ─────────────────────────────────────────────────────────
+
+    def _import_config(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import scene config", "",
+            "Config files (*.config);;All files (*)")
+        if not path:
+            return
+        import configparser
+        cfg = configparser.ConfigParser()
+        try:
+            read_ok = cfg.read(path, encoding="utf-8")
+            if not read_ok:
+                raise OSError("File could not be read")
+        except Exception as exc:
+            QMessageBox.critical(self, "Import failed", str(exc))
+            return
+
+        # Version check (warn, don't block)
+        file_ver = cfg.get("Metadata", "version", fallback=None)
+        if file_ver and file_ver != self._CONFIG_VERSION:
+            QMessageBox.warning(
+                self, "Version mismatch",
+                f"Config version {file_ver!r} differs from expected "
+                f"{self._CONFIG_VERSION!r}. Values will be loaded anyway.")
+
+        loaded = errors = 0
+        for group_name, params in _SCENE_PARAM_GROUPS:
+            section = _SCENE_CONFIG_SECTIONS[group_name]
+            if section not in cfg:
+                continue
+            for key, _, _, lo, hi, *_ in params:
+                raw = cfg[section].get(key)
+                if raw is None:
+                    continue
+                try:
+                    v = float(raw)
+                    self._spinboxes[key].setValue(
+                        max(lo, min(hi, v)))
+                    loaded += 1
+                except ValueError:
+                    errors += 1
+
+        msg = f"Imported {loaded} parameter(s) from {path}"
+        if errors:
+            msg += f"  ({errors} value(s) skipped — unparseable)"
+        print(msg)
+        if errors:
+            QMessageBox.warning(self, "Import warnings", msg)
+
+
+# ─── typed sensor editor (one tab per sensor type) ───────────────────────────
+
+class TypedSensorEditor(QWidget):
+    """
+    Parameter editor with one tab per sensor type.
+    Switching tabs changes the active sensor type.
+    """
+
+    changed = pyqtSignal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._blocked = False
+        self._tab_spinboxes: dict[str, dict[str, QDoubleSpinBox]] = {}
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self._type_tabs = QTabWidget()
+
+        for type_name, type_def in _SENSOR_TYPE_DEFS.items():
+            spinboxes: dict[str, QDoubleSpinBox] = {}
+            box = QGroupBox(f"{type_name} Parameters")
+            vl  = QVBoxLayout(box)
+            vl.setContentsMargins(6, 4, 6, 4)
+            vl.addWidget(_make_param_form(
+                type_def["params"], spinboxes, self._on_value_changed))
+
+            inner = QWidget()
+            il = QVBoxLayout(inner)
+            il.setContentsMargins(4, 4, 4, 4)
+            il.addWidget(box)
+            il.addStretch()
+
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setWidget(inner)
+
+            self._type_tabs.addTab(scroll, type_name)
+            self._tab_spinboxes[type_name] = spinboxes
+
+        self._type_tabs.currentChanged.connect(self._on_tab_changed)
+        layout.addWidget(self._type_tabs)
+
+    def _on_value_changed(self) -> None:
+        if not self._blocked:
+            self.changed.emit()
+
+    def _on_tab_changed(self, _: int) -> None:
+        if not self._blocked:
+            self.changed.emit()
+
+    def get_sensor_type(self) -> str:
+        return self._type_tabs.tabText(self._type_tabs.currentIndex())
+
+    def get_params(self) -> dict[str, float]:
+        stype = self.get_sensor_type()
+        return {k: sb.value() for k, sb in self._tab_spinboxes[stype].items()}
+
+    def set_sensor(self, sensor: dict) -> None:
+        self._blocked = True
+        stype = sensor.get("sensor_type", _SENSOR_TYPE_NAMES[0])
+        for i in range(self._type_tabs.count()):
+            if self._type_tabs.tabText(i) == stype:
+                self._type_tabs.setCurrentIndex(i)
+                break
+        for k, sb in self._tab_spinboxes[stype].items():
+            if k in sensor:
+                sb.setValue(float(sensor[k]))
+        self._blocked = False
+
+
+# ─── sensors tab ─────────────────────────────────────────────────────────────
+
+_BTN_STYLE = (
+    "QPushButton { border: 1px solid #bbb; border-radius: 3px; padding: 3px 10px; }"
+    "QPushButton:hover   { background: #e3f2fd; }"
+    "QPushButton:pressed { background: #bbdefb; }"
+    "QPushButton:disabled{ color: #aaa; }"
+)
+
+
+class SensorsTab(QWidget):
+    """
+    Sensor management tab.
+
+    Left pane  — QTableWidget overview (all sensors, key properties).
+    Right pane — name field + full parameter editor for selected sensor.
+    Add / Duplicate / Remove buttons above the table.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._sensors: list[dict] = [_default_sensor("Sensor 1")]
+        self._current: int = 0
+        self._quiet: bool  = False          # suppress recursive updates
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setHandleWidth(4)
+
+        # ── left pane ────────────────────────────────────────────────────────
+        left = QWidget()
+        left.setMinimumWidth(300)
+        left.setMaximumWidth(480)
+        lv = QVBoxLayout(left)
+        lv.setContentsMargins(4, 4, 2, 4)
+        lv.setSpacing(4)
+
+        # Action buttons
+        btn_row = QHBoxLayout()
+        self._add_btn    = QPushButton("+ Add")
+        self._dup_btn    = QPushButton("⎘ Duplicate")
+        self._del_btn    = QPushButton("− Remove")
+        self._export_btn = QPushButton("↑ Export CSV")
+        self._import_btn = QPushButton("↓ Import CSV")
+        for b in (self._add_btn, self._dup_btn, self._del_btn,
+                  self._export_btn, self._import_btn):
+            b.setStyleSheet(_BTN_STYLE)
+            b.setFixedHeight(26)
+            btn_row.addWidget(b)
+        btn_row.addStretch()
+
+        self._add_btn.clicked.connect(self._add_sensor)
+        self._dup_btn.clicked.connect(self._dup_sensor)
+        self._del_btn.clicked.connect(self._del_sensor)
+        self._export_btn.clicked.connect(self._export_csv)
+        self._import_btn.clicked.connect(self._import_csv)
+
+        # Table
+        n_cols = len(_SENSOR_TABLE_COLS)
+        self._table = QTableWidget(0, n_cols)
+        self._table.setHorizontalHeaderLabels([c[1] for c in _SENSOR_TABLE_COLS])
+        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._table.verticalHeader().setVisible(False)
+        self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for c in range(1, n_cols):
+            self._table.horizontalHeader().setSectionResizeMode(
+                c, QHeaderView.ResizeMode.ResizeToContents)
+        self._table.setAlternatingRowColors(True)
+        self._table.setShowGrid(False)
+        self._table.currentCellChanged.connect(
+            lambda cur_row, *_: self._on_row_changed(cur_row))
+
+        lv.addLayout(btn_row)
+        lv.addWidget(self._table)
+
+        # ── right pane ───────────────────────────────────────────────────────
+        right = QWidget()
+        right.setMinimumWidth(280)
+        rv = QVBoxLayout(right)
+        rv.setContentsMargins(2, 4, 4, 4)
+        rv.setSpacing(6)
+
+        # Sensor name field
+        name_box = QGroupBox("Sensor Identity")
+        name_form = QFormLayout(name_box)
+        name_form.setSpacing(4)
+        name_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        self._name_edit = QLineEdit()
+        self._name_edit.setPlaceholderText("Sensor name…")
+        self._name_edit.textEdited.connect(self._on_name_edited)
+        name_form.addRow("Name:", self._name_edit)
+
+        self._color_lbl = QLabel()
+        self._color_lbl.setFixedHeight(16)
+        self._color_lbl.setToolTip("Plot colour assigned to this sensor")
+        name_form.addRow("Plot colour:", self._color_lbl)
+
+        rv.addWidget(name_box)
+
+        # Parameter editor
+        self._editor = TypedSensorEditor()
+        self._editor.changed.connect(self._on_editor_changed)
+        rv.addWidget(self._editor)
+
+        splitter.addWidget(left)
+        splitter.addWidget(right)
+        splitter.setStretchFactor(0, 2)
+        splitter.setStretchFactor(1, 3)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.addWidget(splitter)
+
+        # Populate initial state
+        self._refresh_table()
+        self._table.selectRow(0)
+
+    # ── internal helpers ─────────────────────────────────────────────────────
+
+    def _color_for(self, idx: int) -> str:
+        return _SENSOR_COLORS[idx % len(_SENSOR_COLORS)]
+
+    def _refresh_table(self) -> None:
+        """Rebuild all table rows from self._sensors."""
+        self._quiet = True
+        self._table.setRowCount(len(self._sensors))
+        for row, sensor in enumerate(self._sensors):
+            self._update_table_row(row, sensor)
+        self._quiet = False
+
+    def _update_table_row(self, row: int, sensor: dict) -> None:
+        for col, (key, _) in enumerate(_SENSOR_TABLE_COLS):
+            raw = sensor.get(key)
+            if raw is None:
+                text = "—"
+            elif key in ("name", "sensor_type"):
+                text = str(raw)
+            else:
+                text = f"{float(raw):.3g}"
+            item = QTableWidgetItem(text)
+            item.setTextAlignment(
+                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft
+                if key == "name"
+                else Qt.AlignmentFlag.AlignCenter
+            )
+            if key == "name":
+                color = self._color_for(row)
+                item.setForeground(QColor(color))
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
+            self._table.setItem(row, col, item)
+
+    def _load_sensor_into_editor(self, idx: int) -> None:
+        sensor = self._sensors[idx]
+        self._quiet = True
+        self._name_edit.setText(sensor["name"])
+        self._editor.set_sensor(sensor)
+        color = self._color_for(idx)
+        self._color_lbl.setStyleSheet(
+            f"background:{color}; border-radius:3px; border:1px solid #999;")
+        self._quiet = False
+
+    # ── slots ────────────────────────────────────────────────────────────────
+
+    def _on_row_changed(self, row: int) -> None:
+        if self._quiet or row < 0 or row >= len(self._sensors):
+            return
+        self._current = row
+        self._load_sensor_into_editor(row)
+        self._del_btn.setEnabled(len(self._sensors) > 1)
+
+    def _on_name_edited(self, text: str) -> None:
+        if self._quiet:
+            return
+        self._sensors[self._current]["name"] = text
+        self._update_table_row(self._current, self._sensors[self._current])
+
+    def _on_editor_changed(self) -> None:
+        if self._quiet:
+            return
+        sensor = self._sensors[self._current]
+        sensor["sensor_type"] = self._editor.get_sensor_type()
+        sensor.update(self._editor.get_params())
+        self._update_table_row(self._current, sensor)
+
+    def _add_sensor(self) -> None:
+        name = f"Sensor {len(self._sensors) + 1}"
+        self._sensors.append(_default_sensor(name))
+        self._refresh_table()
+        self._table.selectRow(len(self._sensors) - 1)
+
+    def _dup_sensor(self) -> None:
+        src  = self._sensors[self._current]
+        copy = dict(src)
+        copy["name"] = src["name"] + " (copy)"
+        self._sensors.append(copy)
+        self._refresh_table()
+        self._table.selectRow(len(self._sensors) - 1)
+
+    def _del_sensor(self) -> None:
+        if len(self._sensors) <= 1:
+            return
+        self._sensors.pop(self._current)
+        new_idx = min(self._current, len(self._sensors) - 1)
+        self._refresh_table()
+        self._table.selectRow(new_idx)
+
+    # ── CSV import / export ──────────────────────────────────────────────────
+
+    # Union of all param keys across every sensor type (deduped, order preserved)
+    _CSV_KEYS = ["name", "sensor_type"] + list(dict.fromkeys(
+        key
+        for td in _SENSOR_TYPE_DEFS.values()
+        for key, *_ in td["params"]
+    ))
+
+    def _export_csv(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export sensors", "sensors.csv",
+            "CSV files (*.csv);;All files (*)")
+        if not path:
+            return
+        import csv
+        try:
+            with open(path, "w", newline="", encoding="utf-8") as fh:
+                writer = csv.DictWriter(fh, fieldnames=self._CSV_KEYS,
+                                        extrasaction="ignore")
+                writer.writeheader()
+                writer.writerows(self._sensors)
+            print(f"Exported {len(self._sensors)} sensor(s) → {path}")
+        except OSError as exc:
+            QMessageBox.critical(self, "Export failed", str(exc))
+
+    def _import_csv(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import sensors", "",
+            "CSV files (*.csv);;All files (*)")
+        if not path:
+            return
+        import csv
+        loaded: list[dict] = []
+        try:
+            with open(path, newline="", encoding="utf-8") as fh:
+                for row in csv.DictReader(fh):
+                    stype  = row.get("sensor_type", _SENSOR_TYPE_NAMES[0])
+                    if stype not in _SENSOR_TYPE_DEFS:
+                        stype = _SENSOR_TYPE_NAMES[0]
+                    sensor = _default_sensor(
+                        row.get("name", f"Sensor {len(loaded)+1}"), stype)
+                    for key, *_ in _SENSOR_TYPE_DEFS[stype]["params"]:
+                        if key in row:
+                            try:
+                                sensor[key] = float(row[key])
+                            except ValueError:
+                                pass
+                    loaded.append(sensor)
+        except OSError as exc:
+            QMessageBox.critical(self, "Import failed", str(exc))
+            return
+
+        if not loaded:
+            QMessageBox.warning(self, "Import", "No sensor rows found in file.")
+            return
+
+        reply = QMessageBox.question(
+            self, "Import sensors",
+            f"Replace current sensors with {len(loaded)} imported sensor(s)?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        self._sensors = loaded
+        self._refresh_table()
+        self._table.selectRow(0)
+        print(f"Imported {len(loaded)} sensor(s) from {path}")
+
+    # ── public API ───────────────────────────────────────────────────────────
+
+    def get_sensors(self) -> list[dict]:
+        """Return a snapshot of all sensor dicts (deep-ish copy)."""
+        return [dict(s) for s in self._sensors]
 
 
 # ─── results panel ────────────────────────────────────────────────────────────
 
-_PASS_COLOR    = "#2196F3"   # blue  — satellite above min elevation
-_DETECT_COLOR  = "#4CAF50"   # green — detected (SNR + vmag OK)
-_SNR_COLOR     = "#FF9800"   # orange
-_VMAG_COLOR    = "#9C27B0"   # purple
+_PASS_COLOR = "#2196F3"
 
-class ResultsPanel(QWidget):
-    """Matplotlib canvas showing analysis results in four subplots + ground track."""
+# (key, tab label, enabled by default)
+_PLOT_DEFS: list[tuple[str, str, bool]] = [
+    ("elevation",   "Elevation",         True),
+    ("range",       "Slant Range",       True),
+    ("snr",         "SNR",               True),
+    ("vmag",        "Visual Magnitude",  True),
+    ("groundtrack", "Ground Track",      True),
+]
+
+
+class _PlotCanvas(QWidget):
+    """One matplotlib figure + navigation toolbar in a widget."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        self.fig    = Figure(tight_layout=True)
+        self.canvas = FigureCanvasQTAgg(self.fig)
+        self.toolbar = NavigationToolbar2QT(self.canvas, self)
+        layout.addWidget(self.toolbar)
+        layout.addWidget(self.canvas)
 
-        self._fig = Figure(figsize=(10, 8), tight_layout=True)
-        self._canvas = FigureCanvasQTAgg(self._fig)
-        self._toolbar = NavigationToolbar2QT(self._canvas, self)
-
-        layout.addWidget(self._toolbar)
-        layout.addWidget(self._canvas)
-
-        self._axes: list = []
-        self._placeholder()
-
-    def _placeholder(self) -> None:
-        self._fig.clear()
-        ax = self._fig.add_subplot(111)
+    def clear_placeholder(self) -> None:
+        self.fig.clear()
+        ax = self.fig.add_subplot(111)
         ax.text(0.5, 0.5, "Run the analysis to see results",
-                ha="center", va="center", fontsize=14, color="#aaa",
+                ha="center", va="center", fontsize=13, color="#aaa",
                 transform=ax.transAxes)
         ax.axis("off")
-        self._canvas.draw()
+        self.canvas.draw()
+
+    def redraw(self) -> None:
+        self.canvas.draw()
+
+
+class ResultsPanel(QWidget):
+    """
+    Results tab with a checkbox row at the top and a QTabWidget below.
+    Each checked plot gets its own tab with a dedicated matplotlib canvas.
+    Checking / unchecking a plot immediately adds or removes its tab.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(4, 4, 4, 4)
+        root.setSpacing(4)
+
+        # ── checkbox strip ───────────────────────────────────────────────────
+        cb_box = QGroupBox("Plots to show")
+        cb_box.setMaximumHeight(54)
+        cb_layout = QHBoxLayout(cb_box)
+        cb_layout.setContentsMargins(8, 2, 8, 2)
+        self._checkboxes: dict[str, QCheckBox] = {}
+        for key, label, default in _PLOT_DEFS:
+            cb = QCheckBox(label)
+            cb.setChecked(default)
+            cb.toggled.connect(lambda checked, k=key: self._on_toggle(k, checked))
+            cb_layout.addWidget(cb)
+            self._checkboxes[key] = cb
+        cb_layout.addStretch()
+        root.addWidget(cb_box)
+
+        # ── plot tab widget ──────────────────────────────────────────────────
+        self._plot_tabs = QTabWidget()
+        root.addWidget(self._plot_tabs)
+
+        # Create one canvas per plot (they may not all be in the tab widget)
+        self._canvases: dict[str, _PlotCanvas] = {
+            key: _PlotCanvas() for key, *_ in _PLOT_DEFS
+        }
+        for key, _, default in _PLOT_DEFS:
+            self._canvases[key].clear_placeholder()
+            if default:
+                label = next(l for k, l, _ in _PLOT_DEFS if k == key)
+                self._plot_tabs.addTab(self._canvases[key], label)
+
+        self._results: dict | None = None
+
+    # ── checkbox toggle ──────────────────────────────────────────────────────
+
+    def _on_toggle(self, key: str, checked: bool) -> None:
+        canvas = self._canvases[key]
+        label  = next(l for k, l, _ in _PLOT_DEFS if k == key)
+        if checked:
+            # Insert at the position that preserves _PLOT_DEFS order
+            key_order = [k for k, *_ in _PLOT_DEFS]
+            insert_at = sum(
+                1 for k in key_order[:key_order.index(key)]
+                if self._checkboxes[k].isChecked()
+            )
+            self._plot_tabs.insertTab(insert_at, canvas, label)
+            if self._results:
+                self._draw_one(key, self._results)
+        else:
+            idx = self._plot_tabs.indexOf(canvas)
+            if idx >= 0:
+                self._plot_tabs.removeTab(idx)
+
+    # ── public update ────────────────────────────────────────────────────────
 
     def update(self, results: dict) -> None:  # type: ignore[override]
-        self._fig.clear()
-        self._draw(results)
-        self._canvas.draw()
+        self._results = results
+        for key in self._checkboxes:
+            if self._checkboxes[key].isChecked():
+                self._draw_one(key, results)
 
-    def _draw(self, r: dict) -> None:
-        t          = r["times_min"]
-        elevations = r["elevations"]
-        ranges     = r["ranges"]
-        snrs       = r["snrs"]
-        vmags      = r["vmags"]
-        visible    = r["visible"]
-        lats       = r["lats"]
-        lons_gt    = r["lons_gt"]
-        p          = r["params"]
+    # ── per-plot draw methods ────────────────────────────────────────────────
 
-        gs = self._fig.add_gridspec(3, 2, hspace=0.45, wspace=0.32,
-                                     left=0.08, right=0.97,
-                                     top=0.95, bottom=0.06)
-        ax_el   = self._fig.add_subplot(gs[0, 0])
-        ax_rng  = self._fig.add_subplot(gs[0, 1])
-        ax_snr  = self._fig.add_subplot(gs[1, 0])
-        ax_vmag = self._fig.add_subplot(gs[1, 1])
-        ax_gt   = self._fig.add_subplot(gs[2, :])
+    def _draw_one(self, key: str, r: dict) -> None:
+        canvas = self._canvases[key]
+        canvas.fig.clear()
+        getattr(self, f"_draw_{key}")(canvas.fig, r)
+        canvas.redraw()
 
-        # ── elevation ────────────────────────────────────────────────────────
-        ax_el.plot(t, elevations, color="#555", lw=1, label="Elevation")
-        ax_el.axhline(p["min_el_deg"], color=_PASS_COLOR, ls="--", lw=1,
-                      label=f"Min el. ({p['min_el_deg']:.0f}°)")
-        _shade_visible(ax_el, t, elevations >= p["min_el_deg"],
-                       color=_PASS_COLOR, alpha=0.12)
-        ax_el.set_xlabel("Time (min)"); ax_el.set_ylabel("Elevation (deg)")
-        ax_el.set_title("Elevation angle"); ax_el.legend(fontsize=8)
-        ax_el.set_ylim(-90, 90); ax_el.grid(True, alpha=0.3)
+    def _draw_elevation(self, fig: Figure, r: dict) -> None:
+        sp  = r["scene_params"]
+        t   = r["times_min"]
+        el  = r["elevations"]
+        ax  = fig.add_subplot(111)
+        ax.plot(t, el, color="#555", lw=1, label="Elevation")
+        ax.axhline(sp["min_el_deg"], color=_PASS_COLOR, ls="--", lw=1,
+                   label=f"Min el. ({sp['min_el_deg']:.0f}°)")
+        _shade_visible(ax, t, el >= sp["min_el_deg"], color=_PASS_COLOR, alpha=0.12)
+        n_passes = _count_passes(el >= sp["min_el_deg"])
+        ax.set_xlabel("Time (min)"); ax.set_ylabel("Elevation (deg)")
+        ax.set_title(f"Elevation angle  —  {n_passes} pass(es) above {sp['min_el_deg']:.0f}°")
+        ax.legend(fontsize=9)
+        ax.set_ylim(-90, 90); ax.grid(True, alpha=0.3)
 
-        # ── range ────────────────────────────────────────────────────────────
-        ax_rng.plot(t, ranges, color=_PASS_COLOR, lw=1.2)
-        ax_rng.set_xlabel("Time (min)"); ax_rng.set_ylabel("Range (km)")
-        ax_rng.set_title("Slant range"); ax_rng.grid(True, alpha=0.3)
+    def _draw_range(self, fig: Figure, r: dict) -> None:
+        ax = fig.add_subplot(111)
+        ax.plot(r["times_min"], r["ranges"], color=_PASS_COLOR, lw=1.2)
+        ax.set_xlabel("Time (min)"); ax.set_ylabel("Range (km)")
+        ax.set_title("Slant range"); ax.grid(True, alpha=0.3)
 
-        # ── SNR ──────────────────────────────────────────────────────────────
-        snr_vals = np.where(np.isnan(snrs), 0.0, snrs)
-        ax_snr.semilogy(t, np.maximum(snr_vals, 1e-3),
-                        color=_SNR_COLOR, lw=1.2, label="SNR")
-        ax_snr.axhline(p["snr_threshold"], color="red", ls="--", lw=1,
-                       label=f"Threshold ({p['snr_threshold']:.1f})")
-        _shade_visible(ax_snr, t, visible, color=_DETECT_COLOR, alpha=0.20)
-        ax_snr.set_xlabel("Time (min)"); ax_snr.set_ylabel("SNR")
-        ax_snr.set_title("Signal-to-noise ratio"); ax_snr.legend(fontsize=8)
-        ax_snr.grid(True, alpha=0.3, which="both")
+    def _draw_snr(self, fig: Figure, r: dict) -> None:
+        t   = r["times_min"]
+        ax  = fig.add_subplot(111)
+        for s_idx, s in enumerate(r["sensors"]):
+            color = _SENSOR_COLORS[s_idx % len(_SENSOR_COLORS)]
+            snr_v = np.where(np.isnan(s["snrs"]), 0.0, s["snrs"])
+            ax.semilogy(t, np.maximum(snr_v, 1e-3), color=color, lw=1.3,
+                        label=s["name"])
+            _shade_visible(ax, t, s["visible"], color=color, alpha=0.10)
+        if r["sensors"]:
+            thr = r["sensors"][0]["params"]["snr_threshold"]
+            ax.axhline(thr, color="red", ls="--", lw=1, label=f"Threshold ({thr:.1f})")
+        ax.set_xlabel("Time (min)"); ax.set_ylabel("SNR")
+        ax.set_title("Signal-to-noise ratio")
+        ax.legend(fontsize=9); ax.grid(True, alpha=0.3, which="both")
 
-        # ── visual magnitude ─────────────────────────────────────────────────
-        vmag_vals = np.where(np.isnan(vmags), 30.0, vmags)
-        ax_vmag.plot(t, vmag_vals, color=_VMAG_COLOR, lw=1.2, label="Vmag")
-        ax_vmag.axhline(p["vizmag_limit"], color="red", ls="--", lw=1,
-                        label=f"Limit ({p['vizmag_limit']:.1f})")
-        ax_vmag.invert_yaxis()
-        _shade_visible(ax_vmag, t, visible, color=_DETECT_COLOR, alpha=0.20)
-        ax_vmag.set_xlabel("Time (min)"); ax_vmag.set_ylabel("Visual magnitude")
-        ax_vmag.set_title("Visual magnitude (brighter ↑)")
-        ax_vmag.legend(fontsize=8); ax_vmag.grid(True, alpha=0.3)
+    def _draw_vmag(self, fig: Figure, r: dict) -> None:
+        t  = r["times_min"]
+        ax = fig.add_subplot(111)
+        for s_idx, s in enumerate(r["sensors"]):
+            color  = _SENSOR_COLORS[s_idx % len(_SENSOR_COLORS)]
+            vmag_v = np.where(np.isnan(s["vmags"]), 30.0, s["vmags"])
+            ax.plot(t, vmag_v, color=color, lw=1.3, label=s["name"])
+            _shade_visible(ax, t, s["visible"], color=color, alpha=0.10)
+        if r["sensors"]:
+            lim = r["sensors"][0]["params"]["vizmag_limit"]
+            ax.axhline(lim, color="red", ls="--", lw=1, label=f"Limit ({lim:.1f})")
+        ax.invert_yaxis()
+        ax.set_xlabel("Time (min)"); ax.set_ylabel("Visual magnitude")
+        ax.set_title("Visual magnitude (brighter ↑)")
+        ax.legend(fontsize=9); ax.grid(True, alpha=0.3)
 
-        # ── ground track ─────────────────────────────────────────────────────
-        ax_gt.set_facecolor("#e8f0fe")
-        ax_gt.plot(lons_gt, lats, color="#555", lw=0.8, alpha=0.6, zorder=2)
-        # Highlight detected portions
-        if visible.any():
-            ax_gt.scatter(lons_gt[visible], lats[visible],
-                          c=_DETECT_COLOR, s=6, zorder=4, label="Detected")
-        # Observer location
-        ax_gt.scatter([p["obs_lon_deg"]], [p["obs_lat_deg"]],
-                      marker="^", s=80, c="red", zorder=5, label="Observer")
-        ax_gt.set_xlim(-180, 180); ax_gt.set_ylim(-90, 90)
-        ax_gt.set_xlabel("Longitude (deg)"); ax_gt.set_ylabel("Latitude (deg)")
-        ax_gt.set_title("Ground track"); ax_gt.legend(fontsize=8)
-        ax_gt.grid(True, alpha=0.3)
-        _draw_coastlines_approx(ax_gt)
+    def _draw_groundtrack(self, fig: Figure, r: dict) -> None:
+        sp  = r["scene_params"]
+        ax  = fig.add_subplot(111)
+        ax.set_facecolor("#e8f0fe")
+        ax.plot(r["lons_gt"], r["lats"], color="#999", lw=0.7,
+                alpha=0.5, zorder=2, label="_nolegend_")
+        for s_idx, s in enumerate(r["sensors"]):
+            color   = _SENSOR_COLORS[s_idx % len(_SENSOR_COLORS)]
+            visible = s["visible"]
+            if visible.any():
+                ax.scatter(r["lons_gt"][visible], r["lats"][visible],
+                           c=color, s=8, zorder=4, alpha=0.8,
+                           label=f"{s['name']} detected")
+        ax.scatter([sp["obs_lon_deg"]], [sp["obs_lat_deg"]],
+                   marker="^", s=90, c="red", zorder=5, label="Observer")
+        ax.set_xlim(-180, 180); ax.set_ylim(-90, 90)
+        ax.set_xlabel("Longitude (deg)"); ax.set_ylabel("Latitude (deg)")
+        ax.set_title("Ground track"); ax.legend(fontsize=9)
+        ax.grid(True, alpha=0.3)
+        _draw_coastlines_approx(ax)
 
-        # ── detection summary in title ────────────────────────────────────────
-        n_passes  = _count_passes(elevations >= p["min_el_deg"])
-        det_frac  = float(visible.sum()) / len(visible) * 100 if len(visible) else 0
-        self._fig.suptitle(
-            f"Passes above {p['min_el_deg']:.0f}°: {n_passes}   |   "
-            f"Detection fraction: {det_frac:.1f}%   |   "
-            f"Duration: {p['duration_min']:.0f} min",
-            fontsize=10, y=0.998,
-        )
 
+# ─── helpers ──────────────────────────────────────────────────────────────────
 
 def _shade_visible(ax, t: np.ndarray, mask: np.ndarray,
                    color: str, alpha: float) -> None:
-    """Shade time intervals where mask is True."""
     in_block = False
     t0 = 0.0
     for i, m in enumerate(mask):
@@ -565,53 +1236,505 @@ def _shade_visible(ax, t: np.ndarray, mask: np.ndarray,
 
 
 def _count_passes(above: np.ndarray) -> int:
-    """Count contiguous True blocks."""
     return int(np.sum(np.diff(above.astype(int)) == 1))
 
 
 def _draw_coastlines_approx(ax) -> None:
-    """Draw a rough world coastline outline using simplified polygons."""
-    try:
-        # Use cartopy or shapely if available — skip silently if not
-        import importlib
-        if importlib.util.find_spec("cartopy") is not None:
-            import cartopy.crs as ccrs  # type: ignore
-            import cartopy.feature as cfeature  # type: ignore
-            # Can't add cartopy to an existing Axes this way — skip
-            pass
-    except Exception:
-        pass
-    # Minimal continents: draw a box outline so the plot isn't blank
     for lon0, lat0, lon1, lat1 in [
-        (-125, 25, -65, 50),  # North America
-        (-80, -55, -35, 10),  # South America
-        (-10, 35, 40, 70),    # Europe
-        (25, -35, 52, 38),    # Africa
-        (60, 10, 140, 55),    # Asia
-        (113, -45, 155, -10), # Australia
+        (-125, 25, -65, 50), (-80, -55, -35, 10), (-10, 35, 40, 70),
+        (25, -35, 52, 38), (60, 10, 140, 55), (113, -45, 155, -10),
     ]:
         ax.plot([lon0, lon1, lon1, lon0, lon0],
                 [lat0, lat0, lat1, lat1, lat0],
                 color="#bbb", lw=0.5, zorder=1)
 
 
+# ─── target sweep ────────────────────────────────────────────────────────────
+
+def _parse_float_list(
+    text: str, lo: float, hi: float, name: str = "value"
+) -> list[float]:
+    """Parse a comma-separated string into validated floats."""
+    out: list[float] = []
+    for part in text.split(","):
+        s = part.strip()
+        if not s:
+            continue
+        try:
+            v = float(s)
+        except ValueError:
+            raise ValueError(f"Cannot parse {s!r} as a number in {name}")
+        if not (lo <= v <= hi):
+            raise ValueError(
+                f"{name} value {v} is outside allowed range [{lo}, {hi}]"
+            )
+        out.append(v)
+    if not out:
+        raise ValueError(f"No {name} values provided")
+    return out
+
+
+class TargetSweepWorker(QObject):
+    """Sweeps over (diameter × albedo) cross-product for all sensors."""
+
+    progress = pyqtSignal(int, str)
+    finished = pyqtSignal(dict)
+    error    = pyqtSignal(str)
+
+    def __init__(
+        self,
+        scene_params: dict,
+        sensors: list[dict],
+        diameters: list[float],
+        albedos: list[float],
+    ) -> None:
+        super().__init__()
+        self.scene_params = scene_params
+        self.sensors      = sensors
+        self.diameters    = diameters
+        self.albedos      = albedos
+        self._cancelled   = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    def run(self) -> None:
+        try:
+            self.finished.emit(self._analyse())
+        except Exception as exc:
+            self.error.emit(f"{type(exc).__name__}: {exc}")
+
+    def _analyse(self) -> dict:
+        p = self.scene_params
+        self.progress.emit(0, "Sweep: propagating orbit…")
+
+        a_km = _R_E_KM + p["alt_km"]
+        e    = p["ecc"]
+        i    = math.radians(p["incl_deg"])
+        raan = math.radians(p["raan_deg"])
+        argp = math.radians(p["argp_deg"])
+        M0   = math.radians(p["m0_deg"])
+        n_mm = math.sqrt(_MU_KM3_S2 / a_km ** 3)
+
+        n_steps = int(p["duration_min"] * 60.0 / p["step_sec"]) + 1
+        times   = np.arange(n_steps) * p["step_sec"]
+
+        elevations  = np.empty(n_steps)
+        ranges      = np.empty(n_steps)
+        illuminated = np.empty(n_steps, dtype=bool)
+
+        for idx, t in enumerate(times):
+            if self._cancelled:
+                break
+            M       = M0 + n_mm * t
+            sat_eci = _keplerian_pos_eci(a_km, e, i, raan, argp, M)
+            obs_eci = _lla_to_eci(p["obs_lat_deg"], p["obs_lon_deg"], p["obs_alt_m"], t)
+            el, rng = _elevation_range(obs_eci, sat_eci,
+                                        p["obs_lat_deg"], p["obs_lon_deg"], t)
+            elevations[idx]  = el
+            ranges[idx]      = rng
+            illuminated[idx] = _is_illuminated(sat_eci, _sun_dir_eci(t))
+            if idx % max(1, n_steps // 40) == 0:
+                self.progress.emit(int(idx / n_steps * 35),
+                                   f"Sweep: orbit {idx}/{n_steps}")
+
+        above = (elevations >= p["min_el_deg"]) & illuminated
+
+        # Cross-product of diameters × albedos
+        import itertools
+        combos = list(itertools.product(self.diameters, self.albedos))
+        n_combos = len(combos)
+
+        combo_results: list[dict] = []
+        for c_idx, (diam, alb) in enumerate(combos):
+            if self._cancelled:
+                break
+            pct = 36 + int(c_idx / n_combos * 60)
+            self.progress.emit(pct,
+                f"Sweep: D={diam:.3g} m  alb={alb:.3g}  ({c_idx+1}/{n_combos})")
+
+            sensor_data: list[dict] = []
+            for sensor in self.sensors:
+                snrs    = np.full(n_steps, np.nan)
+                vmags   = np.full(n_steps, np.nan)
+                visible = np.zeros(n_steps, dtype=bool)
+                for idx in np.where(above)[0]:
+                    rng = float(ranges[idx])
+                    snr = _compute_snr(rng, diam, alb, sensor["aperture_m"],
+                                       sensor["exposure_s"], sensor["qe"],
+                                       sensor["read_noise_e"], sensor["loop_gain_db"])
+                    vm  = _compute_vizmag(rng, diam, alb)
+                    snrs[idx]    = snr
+                    vmags[idx]   = vm
+                    visible[idx] = (snr >= sensor["snr_threshold"]
+                                    and vm <= sensor["vizmag_limit"])
+                sensor_data.append(dict(
+                    name    = sensor["name"],
+                    snrs    = snrs,
+                    vmags   = vmags,
+                    visible = visible,
+                ))
+
+            combo_results.append(dict(
+                label   = f"D={diam:.3g} m, alb={alb:.3g}",
+                diam    = diam,
+                albedo  = alb,
+                sensors = sensor_data,
+            ))
+
+        self.progress.emit(98, "Sweep: collating…")
+        return dict(
+            times_min   = times / 60.0,
+            elevations  = elevations,
+            ranges      = ranges,
+            scene_params = p,
+            sensor_names = [s["name"] for s in self.sensors],
+            combos      = combo_results,
+        )
+
+
+# ── sweep panel ───────────────────────────────────────────────────────────────
+
+_SWEEP_COLORS = [
+    "#E53935", "#8E24AA", "#1E88E5", "#00ACC1",
+    "#43A047", "#FB8C00", "#6D4C41", "#546E7A",
+    "#F06292", "#AED581", "#FFD54F", "#80DEEA",
+]
+
+
+class TargetSweepPanel(QWidget):
+    """
+    Parametric analysis over multiple target diameters and/or albedos.
+    Enter comma-separated values; the analysis runs the cross-product of
+    diameters × albedos for every sensor defined in the Sensors tab.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._worker: TargetSweepWorker | None = None
+        self._thread: QThread | None = None
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(6, 6, 6, 6)
+        root.setSpacing(6)
+
+        # ── input group ──────────────────────────────────────────────────────
+        inp = QGroupBox("Target properties  (comma-separated values)")
+        form = QFormLayout(inp)
+        form.setSpacing(6)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        self._diam_edit = QLineEdit("0.5, 1.0, 2.0, 5.0")
+        self._diam_edit.setToolTip(
+            "Target cross-section diameters in metres, e.g.  0.1, 0.5, 1, 2, 5")
+        self._diam_edit.setPlaceholderText("e.g.  0.1, 0.5, 1.0, 2.0")
+
+        self._alb_edit = QLineEdit("0.3")
+        self._alb_edit.setToolTip(
+            "Albedo values (0–1).  A single value is applied to all diameters; "
+            "multiple values are crossed with all diameters.")
+        self._alb_edit.setPlaceholderText("e.g.  0.1, 0.3, 0.5")
+
+        form.addRow("Diameters (m):", self._diam_edit)
+        form.addRow("Albedos:", self._alb_edit)
+        root.addWidget(inp)
+
+        # ── run bar ──────────────────────────────────────────────────────────
+        run_bar = QHBoxLayout()
+        self._run_btn = QPushButton("▶  Run Sweep")
+        self._run_btn.setFixedHeight(30)
+        self._run_btn.setStyleSheet(
+            "QPushButton { background:#388E3C; color:white; font-weight:bold;"
+            "  border-radius:4px; padding:0 16px; }"
+            "QPushButton:hover   { background:#2E7D32; }"
+            "QPushButton:pressed { background:#1B5E20; }"
+            "QPushButton:disabled{ background:#aaa; }"
+        )
+        self._cancel_btn = QPushButton("Cancel")
+        self._cancel_btn.setFixedHeight(30)
+        self._cancel_btn.setEnabled(False)
+        self._progress = QProgressBar()
+        self._progress.setRange(0, 100)
+        self._progress.setFixedHeight(22)
+        self._status_lbl = QLabel("Ready")
+        self._status_lbl.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+
+        self._run_btn.clicked.connect(self._on_run_clicked)
+        self._cancel_btn.clicked.connect(self._on_cancel)
+
+        run_bar.addWidget(self._run_btn)
+        run_bar.addWidget(self._cancel_btn)
+        run_bar.addWidget(self._progress, stretch=1)
+        run_bar.addWidget(self._status_lbl)
+        root.addLayout(run_bar)
+
+        # ── result plots ─────────────────────────────────────────────────────
+        self._plot_tabs = QTabWidget()
+        self._cv_snr_time  = _PlotCanvas()
+        self._cv_peak_snr  = _PlotCanvas()
+        self._cv_det_pct   = _PlotCanvas()
+        self._cv_vmag_time = _PlotCanvas()
+        self._plot_tabs.addTab(self._cv_snr_time,  "SNR vs Time")
+        self._plot_tabs.addTab(self._cv_peak_snr,  "Peak SNR vs Diameter")
+        self._plot_tabs.addTab(self._cv_det_pct,   "Detection %")
+        self._plot_tabs.addTab(self._cv_vmag_time, "Vmag vs Time")
+        for cv in (self._cv_snr_time, self._cv_peak_snr,
+                   self._cv_det_pct, self._cv_vmag_time):
+            cv.clear_placeholder()
+        root.addWidget(self._plot_tabs)
+
+        # Stored so MainWindow can inject scene/sensor data before running
+        self._scene_params: dict | None = None
+        self._sensors: list[dict] | None = None
+
+    # ── called by MainWindow to inject current scene + sensor data ────────────
+
+    def set_context(self, scene_params: dict, sensors: list[dict]) -> None:
+        self._scene_params = scene_params
+        self._sensors      = sensors
+
+    # ── internal ─────────────────────────────────────────────────────────────
+
+    def _on_run_clicked(self) -> None:
+        if self._thread and self._thread.isRunning():
+            return
+        if not self._scene_params or not self._sensors:
+            QMessageBox.warning(self, "No context",
+                                "Click '▶ Run Analysis' first to compute the "
+                                "base orbit, then run the sweep.")
+            return
+        try:
+            diameters = _parse_float_list(
+                self._diam_edit.text(), 0.001, 1000.0, "diameter")
+            albedos   = _parse_float_list(
+                self._alb_edit.text(), 0.0, 1.0, "albedo")
+        except ValueError as exc:
+            QMessageBox.warning(self, "Bad input", str(exc))
+            return
+
+        self._worker = TargetSweepWorker(
+            self._scene_params, self._sensors, diameters, albedos)
+        self._thread = QThread(self)
+        self._worker.moveToThread(self._thread)
+        self._thread.started.connect(self._worker.run)
+        self._worker.progress.connect(self._on_progress)
+        self._worker.finished.connect(self._on_finished)
+        self._worker.error.connect(self._on_error)
+        self._worker.finished.connect(self._thread.quit)
+        self._worker.finished.connect(self._worker.deleteLater)
+        self._thread.finished.connect(self._thread.deleteLater)
+        self._thread.finished.connect(self._on_thread_done)
+
+        self._run_btn.setEnabled(False)
+        self._cancel_btn.setEnabled(True)
+        self._progress.setValue(0)
+        self._status_lbl.setText("Running sweep…")
+        self._thread.start()
+
+    def _on_cancel(self) -> None:
+        if self._worker:
+            self._worker.cancel()
+        self._cancel_btn.setEnabled(False)
+        self._status_lbl.setText("Cancelled.")
+
+    def _on_progress(self, pct: int, msg: str) -> None:
+        self._progress.setValue(pct)
+        self._status_lbl.setText(msg)
+
+    def _on_finished(self, results: dict) -> None:
+        self._progress.setValue(100)
+        self._status_lbl.setText(
+            f"Sweep done — {len(results['combos'])} combinations × "
+            f"{len(results['sensor_names'])} sensor(s).")
+        self._draw_results(results)
+
+    def _on_error(self, msg: str) -> None:
+        self._progress.setValue(0)
+        self._status_lbl.setText(f"Error: {msg}")
+        QMessageBox.critical(self, "Sweep error", msg)
+
+    def _on_thread_done(self) -> None:
+        self._run_btn.setEnabled(True)
+        self._cancel_btn.setEnabled(False)
+        self._worker = None
+        self._thread = None
+
+    # ── drawing ───────────────────────────────────────────────────────────────
+
+    def _draw_results(self, r: dict) -> None:
+        combos       = r["combos"]
+        sensor_names = r["sensor_names"]
+        times        = r["times_min"]
+        n_sensors    = len(sensor_names)
+
+        albedos_unique   = sorted({c["albedo"]  for c in combos})
+
+        # ── SNR vs Time ──────────────────────────────────────────────────────
+        fig = self._cv_snr_time.fig
+        fig.clear()
+        axes = fig.subplots(1, n_sensors, squeeze=False)[0] if n_sensors else []
+        for s_idx, s_name in enumerate(sensor_names):
+            ax = axes[s_idx]
+            for c_idx, combo in enumerate(combos):
+                color = _SWEEP_COLORS[c_idx % len(_SWEEP_COLORS)]
+                snr_v = np.where(np.isnan(combo["sensors"][s_idx]["snrs"]),
+                                 0.0, combo["sensors"][s_idx]["snrs"])
+                ax.semilogy(times, np.maximum(snr_v, 1e-3),
+                            color=color, lw=1.1, label=combo["label"])
+            ax.set_title(s_name, fontsize=9)
+            ax.set_xlabel("Time (min)"); ax.set_ylabel("SNR")
+            ax.grid(True, alpha=0.3, which="both")
+            if s_idx == 0:
+                ax.legend(fontsize=7, loc="upper right")
+        fig.suptitle("SNR vs Time — target sweep", fontsize=9)
+        self._cv_snr_time.redraw()
+
+        # ── Vmag vs Time ─────────────────────────────────────────────────────
+        fig = self._cv_vmag_time.fig
+        fig.clear()
+        axes = fig.subplots(1, n_sensors, squeeze=False)[0] if n_sensors else []
+        for s_idx, s_name in enumerate(sensor_names):
+            ax = axes[s_idx]
+            for c_idx, combo in enumerate(combos):
+                color  = _SWEEP_COLORS[c_idx % len(_SWEEP_COLORS)]
+                vmag_v = np.where(np.isnan(combo["sensors"][s_idx]["vmags"]),
+                                  30.0, combo["sensors"][s_idx]["vmags"])
+                ax.plot(times, vmag_v, color=color, lw=1.1, label=combo["label"])
+            ax.invert_yaxis()
+            ax.set_title(s_name, fontsize=9)
+            ax.set_xlabel("Time (min)"); ax.set_ylabel("Visual magnitude")
+            ax.grid(True, alpha=0.3)
+            if s_idx == 0:
+                ax.legend(fontsize=7, loc="upper right")
+        fig.suptitle("Visual magnitude vs Time — target sweep", fontsize=9)
+        self._cv_vmag_time.redraw()
+
+        # ── Peak SNR vs Diameter ─────────────────────────────────────────────
+        fig = self._cv_peak_snr.fig
+        fig.clear()
+        ax  = fig.add_subplot(111)
+        for s_idx, s_name in enumerate(sensor_names):
+            color = _SENSOR_COLORS[s_idx % len(_SENSOR_COLORS)]
+            for alb in albedos_unique:
+                xs, ys = [], []
+                for combo in combos:
+                    if combo["albedo"] != alb:
+                        continue
+                    snrs = combo["sensors"][s_idx]["snrs"]
+                    peak = float(np.nanmax(snrs)) if not np.all(np.isnan(snrs)) else 0.0
+                    xs.append(combo["diam"])
+                    ys.append(peak)
+                lbl = f"{s_name} (alb={alb:.2g})"
+                ax.loglog(xs, ys, "o-", color=color, lw=1.3, label=lbl)
+        ax.set_xlabel("Target diameter (m)")
+        ax.set_ylabel("Peak SNR")
+        ax.set_title("Peak SNR vs diameter")
+        ax.legend(fontsize=8); ax.grid(True, alpha=0.3, which="both")
+        self._cv_peak_snr.redraw()
+
+        # ── Detection % vs Diameter ──────────────────────────────────────────
+        fig = self._cv_det_pct.fig
+        fig.clear()
+        ax  = fig.add_subplot(111)
+        n_t = len(times)
+        for s_idx, s_name in enumerate(sensor_names):
+            color = _SENSOR_COLORS[s_idx % len(_SENSOR_COLORS)]
+            for alb in albedos_unique:
+                xs, ys = [], []
+                for combo in combos:
+                    if combo["albedo"] != alb:
+                        continue
+                    pct = float(combo["sensors"][s_idx]["visible"].sum()) / n_t * 100
+                    xs.append(combo["diam"])
+                    ys.append(pct)
+                lbl = f"{s_name} (alb={alb:.2g})"
+                ax.semilogx(xs, ys, "o-", color=color, lw=1.3, label=lbl)
+        ax.set_xlabel("Target diameter (m)")
+        ax.set_ylabel("Detection fraction (%)")
+        ax.set_title("Detection % vs diameter")
+        ax.set_ylim(0, 105)
+        ax.legend(fontsize=8); ax.grid(True, alpha=0.3)
+        self._cv_det_pct.redraw()
+
+
+# ─── stdout redirector + console widget ──────────────────────────────────────
+
+class StdoutRedirector(QObject):
+    """Intercepts sys.stdout writes and re-emits them as a Qt signal."""
+
+    text_written = pyqtSignal(str)
+
+    def write(self, text: str) -> None:
+        if text:
+            self.text_written.emit(text)
+
+    def flush(self) -> None:
+        pass
+
+    def isatty(self) -> bool:
+        return False
+
+
+class ConsoleWidget(QWidget):
+    """Read-only scrollable console that shows redirected stdout."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+
+        # Header row
+        header = QHBoxLayout()
+        lbl = QLabel("Console output")
+        lbl.setStyleSheet("font-size: 11px; color: #555; font-weight: bold;")
+        clear_btn = QPushButton("Clear")
+        clear_btn.setFixedHeight(20)
+        clear_btn.setStyleSheet(
+            "QPushButton { font-size:11px; padding:0 8px; border:1px solid #ccc;"
+            "  border-radius:3px; }"
+            "QPushButton:hover { background:#f0f0f0; }"
+        )
+        header.addWidget(lbl)
+        header.addStretch()
+        header.addWidget(clear_btn)
+
+        # Text area
+        self._edit = QTextEdit()
+        self._edit.setReadOnly(True)
+        self._edit.setFont(QFont("Consolas", 9))
+        self._edit.setStyleSheet(
+            "QTextEdit { background:#1e1e1e; color:#d4d4d4;"
+            "  border:none; border-top:1px solid #ccc; }"
+        )
+        self._edit.setMinimumHeight(80)
+
+        clear_btn.clicked.connect(self._edit.clear)
+
+        layout.addLayout(header)
+        layout.addWidget(self._edit)
+
+    def append(self, text: str) -> None:
+        """Append *text* and auto-scroll to bottom."""
+        # Strip trailing newline so we don't double-space via appendPlainText
+        self._edit.moveCursor(self._edit.textCursor().MoveOperation.End)
+        self._edit.insertPlainText(text)
+        self._edit.ensureCursorVisible()
+
+
 # ─── banner ───────────────────────────────────────────────────────────────────
 
 class BannerWidget(QWidget):
-    """
-    Fixed-height header banner: dark-blue gradient background, title on the
-    left and a subtitle / version tag on the right.
-    """
-
     _BG_LEFT  = QColor("#0D47A1")
     _BG_RIGHT = QColor("#1565C0")
     _ACCENT   = QColor("#42A5F5")
 
     def __init__(
         self,
-        title: str = "EO Ground Station Analysis",
-        subtitle: str = "Keplerian orbit propagation · SNR · Visual magnitude",
-        version: str = "v0.1",
+        title:    str = "EO Ground Station Analysis",
+        subtitle: str = "Keplerian orbit propagation · SNR · Visual magnitude · Multi-sensor",
+        version:  str = "v0.2",
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -625,40 +1748,26 @@ class BannerWidget(QWidget):
         del event
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-        # Gradient background
         grad = QLinearGradient(0, 0, self.width(), 0)
         grad.setColorAt(0.0, self._BG_LEFT)
         grad.setColorAt(1.0, self._BG_RIGHT)
         p.fillRect(self.rect(), QBrush(grad))
-
-        # Accent bar on the left edge
         p.fillRect(0, 0, 5, self.height(), self._ACCENT)
-
-        # Title
-        title_font = QFont("Segoe UI", 15, QFont.Weight.Bold)
-        p.setFont(title_font)
+        p.setFont(QFont("Segoe UI", 15, QFont.Weight.Bold))
         p.setPen(QColor("#FFFFFF"))
         p.drawText(18, 0, self.width() - 120, self.height(),
                    Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
                    self._title)
-
-        # Subtitle (below title, smaller)
-        sub_font = QFont("Segoe UI", 8)
-        p.setFont(sub_font)
+        p.setFont(QFont("Segoe UI", 8))
         p.setPen(QColor("#90CAF9"))
         p.drawText(20, 26, self.width() - 130, self.height() - 26,
                    Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft,
                    self._subtitle)
-
-        # Version tag — right-aligned
-        ver_font = QFont("Consolas", 8)
-        p.setFont(ver_font)
+        p.setFont(QFont("Consolas", 8))
         p.setPen(QColor("#64B5F6"))
         p.drawText(0, 0, self.width() - 10, self.height(),
                    Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
                    self._version)
-
         p.end()
 
 
@@ -669,14 +1778,15 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("EO Ground Station Sensor Analysis")
-        self.resize(1200, 780)
-
+        self.resize(1260, 820)
         self._worker: AnalysisWorker | None = None
         self._thread: QThread | None = None
-
+        self._stdout_orig = sys.stdout
         self._build_ui()
-
-    # ── UI construction ──────────────────────────────────────────────────────
+        # Install stdout redirector after UI exists
+        self._redirector = StdoutRedirector()
+        self._redirector.text_written.connect(self._console.append)
+        sys.stdout = self._redirector  # type: ignore[assignment]
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -685,24 +1795,38 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(6, 6, 6, 6)
         root.setSpacing(6)
 
-        # ── banner ───────────────────────────────────────────────────────────
         root.addWidget(BannerWidget())
 
-        # ── tab widget ───────────────────────────────────────────────────────
         self._tabs = QTabWidget()
         root.addWidget(self._tabs)
 
-        # Tab 0: Parameters
+        # Tab 0: Scene/Orbit params + console (vertical splitter)
         self._params_panel = ParameterPanel()
-        self._tabs.addTab(self._params_panel, "Parameters")
+        self._console = ConsoleWidget()
+        scene_splitter = QSplitter(Qt.Orientation.Vertical)
+        scene_splitter.addWidget(self._params_panel)
+        scene_splitter.addWidget(self._console)
+        scene_splitter.setStretchFactor(0, 3)
+        scene_splitter.setStretchFactor(1, 1)
+        scene_splitter.setSizes([520, 160])
+        self._tabs.addTab(scene_splitter, "Scene / Orbit")
 
-        # Tab 1: Results
+        self._sensors_tab = SensorsTab()
+        self._tabs.addTab(self._sensors_tab, "Sensors")
+
         self._results_panel = ResultsPanel()
         self._tabs.addTab(self._results_panel, "Results")
 
-        # ── bottom bar: progress + buttons ───────────────────────────────────
+        self._sweep_panel = TargetSweepPanel()
+        self._tabs.addTab(self._sweep_panel, "Target Sweep")
+
+        # Bottom bar
         bar = QHBoxLayout()
         bar.setSpacing(8)
+
+        self._status_lbl = QLabel("Ready")
+        self._status_lbl.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
 
         self._progress = QProgressBar()
         self._progress.setRange(0, 100)
@@ -715,11 +1839,11 @@ class MainWindow(QMainWindow):
         self._run_btn.setFixedHeight(30)
         self._run_btn.setDefault(True)
         self._run_btn.setStyleSheet(
-            "QPushButton { background: #1976D2; color: white; font-weight: bold;"
-            "  border-radius: 4px; padding: 0 16px; }"
-            "QPushButton:hover  { background: #1565C0; }"
-            "QPushButton:pressed{ background: #0D47A1; }"
-            "QPushButton:disabled{ background: #aaa; }"
+            "QPushButton { background:#1976D2; color:white; font-weight:bold;"
+            "  border-radius:4px; padding:0 16px; }"
+            "QPushButton:hover   { background:#1565C0; }"
+            "QPushButton:pressed { background:#0D47A1; }"
+            "QPushButton:disabled{ background:#aaa; }"
         )
         self._run_btn.clicked.connect(self._start_analysis)
 
@@ -727,10 +1851,6 @@ class MainWindow(QMainWindow):
         self._cancel_btn.setFixedHeight(30)
         self._cancel_btn.setEnabled(False)
         self._cancel_btn.clicked.connect(self._cancel_analysis)
-
-        self._status_lbl = QLabel("Ready")
-        self._status_lbl.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
 
         bar.addWidget(self._status_lbl)
         bar.addWidget(self._progress, stretch=1)
@@ -744,13 +1864,16 @@ class MainWindow(QMainWindow):
         if self._thread and self._thread.isRunning():
             return
 
-        params = self._params_panel.get_params()
+        sensors = self._sensors_tab.get_sensors()
+        if not sensors:
+            QMessageBox.warning(self, "No sensors", "Add at least one sensor before running.")
+            return
 
-        self._worker = AnalysisWorker(params)
+        scene_params = self._params_panel.get_params()
+
+        self._worker = AnalysisWorker(scene_params, sensors)
         self._thread = QThread(self)
-
         self._worker.moveToThread(self._thread)
-
         self._thread.started.connect(self._worker.run)
         self._worker.progress.connect(self._on_progress)
         self._worker.finished.connect(self._on_finished)
@@ -764,7 +1887,6 @@ class MainWindow(QMainWindow):
         self._cancel_btn.setEnabled(True)
         self._progress.setValue(0)
         self._status_lbl.setText("Running…")
-
         self._thread.start()
 
     def _cancel_analysis(self) -> None:
@@ -772,8 +1894,6 @@ class MainWindow(QMainWindow):
             self._worker.cancel()
         self._status_lbl.setText("Cancelled.")
         self._cancel_btn.setEnabled(False)
-
-    # ── slots ────────────────────────────────────────────────────────────────
 
     def _on_progress(self, pct: int, msg: str) -> None:
         self._progress.setValue(pct)
@@ -783,8 +1903,12 @@ class MainWindow(QMainWindow):
         self._progress.setValue(100)
         self._status_lbl.setText("Done — updating plots…")
         self._results_panel.update(results)
-        self._tabs.setCurrentIndex(1)
-        self._status_lbl.setText("Analysis complete.")
+        self._sweep_panel.set_context(results["scene_params"],
+                                      self._sensors_tab.get_sensors())
+        self._tabs.setCurrentWidget(self._results_panel)
+        n = len(results["sensors"])
+        self._status_lbl.setText(
+            f"Analysis complete — {n} sensor{'s' if n != 1 else ''}.")
 
     def _on_error(self, msg: str) -> None:
         self._progress.setValue(0)
@@ -797,9 +1921,8 @@ class MainWindow(QMainWindow):
         self._worker = None
         self._thread = None
 
-    # ── close event ──────────────────────────────────────────────────────────
-
     def closeEvent(self, event) -> None:
+        sys.stdout = self._stdout_orig
         self._cancel_analysis()
         super().closeEvent(event)
 
@@ -810,22 +1933,18 @@ def main(argv: list[str] | None = None) -> int:
     app = QApplication(argv or sys.argv)
     app.setApplicationName("EO Analysis")
     app.setStyle("Fusion")
-
-    # Slightly warmer palette
     pal = app.palette()
-    pal.setColor(QPalette.ColorRole.Window,      QColor("#f5f5f5"))
-    pal.setColor(QPalette.ColorRole.WindowText,  QColor("#212121"))
-    pal.setColor(QPalette.ColorRole.Base,        QColor("#ffffff"))
+    pal.setColor(QPalette.ColorRole.Window,        QColor("#f5f5f5"))
+    pal.setColor(QPalette.ColorRole.WindowText,    QColor("#212121"))
+    pal.setColor(QPalette.ColorRole.Base,          QColor("#ffffff"))
     pal.setColor(QPalette.ColorRole.AlternateBase, QColor("#fafafa"))
     app.setPalette(pal)
-
     win = MainWindow()
     win.show()
     return app.exec()
 
 
 if __name__ == "__main__":
-    # Allow running directly from repo root without installing
-    import pathlib, sys as _sys
-    _sys.path.insert(0, str(pathlib.Path(__file__).parents[3]))
+    import pathlib
+    sys.path.insert(0, str(pathlib.Path(__file__).parents[3]))
     raise SystemExit(main())
