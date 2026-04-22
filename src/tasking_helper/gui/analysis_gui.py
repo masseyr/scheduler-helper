@@ -1082,7 +1082,7 @@ class SensorsTab(QWidget):
 
         # Populate initial state
         self._refresh_table()
-        self._table.selectRow(0)
+        self._select(0)
 
     # ── internal helpers ─────────────────────────────────────────────────────
 
@@ -1090,12 +1090,22 @@ class SensorsTab(QWidget):
         return _SENSOR_COLORS[idx % len(_SENSOR_COLORS)]
 
     def _refresh_table(self) -> None:
-        """Rebuild all table rows from self._sensors."""
-        self._quiet = True
+        """Rebuild all table rows from self._sensors (signals blocked)."""
+        self._table.blockSignals(True)
         self._table.setRowCount(len(self._sensors))
         for row, sensor in enumerate(self._sensors):
             self._update_table_row(row, sensor)
+        self._table.blockSignals(False)
+
+    def _select(self, idx: int) -> None:
+        """Select a sensor row and refresh the editor — bypasses signal chain."""
+        self._current = max(0, min(idx, len(self._sensors) - 1))
+        # Visually select the row without triggering _on_row_changed
+        self._quiet = True
+        self._table.selectRow(self._current)
         self._quiet = False
+        self._load_sensor_into_editor(self._current)
+        self._del_btn.setEnabled(len(self._sensors) > 1)
 
     def _update_table_row(self, row: int, sensor: dict) -> None:
         for col, (key, _) in enumerate(_SENSOR_TABLE_COLS):
@@ -1135,18 +1145,16 @@ class SensorsTab(QWidget):
     def _on_row_changed(self, row: int) -> None:
         if self._quiet or row < 0 or row >= len(self._sensors):
             return
-        self._current = row
-        self._load_sensor_into_editor(row)
-        self._del_btn.setEnabled(len(self._sensors) > 1)
+        self._select(row)
 
     def _on_name_edited(self, text: str) -> None:
-        if self._quiet:
+        if self._quiet or self._current >= len(self._sensors):
             return
         self._sensors[self._current]["name"] = text
         self._update_table_row(self._current, self._sensors[self._current])
 
     def _on_editor_changed(self) -> None:
-        if self._quiet:
+        if self._quiet or self._current >= len(self._sensors):
             return
         sensor = self._sensors[self._current]
         sensor["sensor_type"] = self._editor.get_sensor_type()
@@ -1157,7 +1165,7 @@ class SensorsTab(QWidget):
         name = f"Sensor {len(self._sensors) + 1}"
         self._sensors.append(_default_sensor(name))
         self._refresh_table()
-        self._table.selectRow(len(self._sensors) - 1)
+        self._select(len(self._sensors) - 1)
 
     def _dup_sensor(self) -> None:
         src  = self._sensors[self._current]
@@ -1165,15 +1173,14 @@ class SensorsTab(QWidget):
         copy["name"] = src["name"] + " (copy)"
         self._sensors.append(copy)
         self._refresh_table()
-        self._table.selectRow(len(self._sensors) - 1)
+        self._select(len(self._sensors) - 1)
 
     def _del_sensor(self) -> None:
         if len(self._sensors) <= 1:
             return
         self._sensors.pop(self._current)
-        new_idx = min(self._current, len(self._sensors) - 1)
         self._refresh_table()
-        self._table.selectRow(new_idx)
+        self._select(min(self._current, len(self._sensors) - 1))
 
     # ── CSV import / export ──────────────────────────────────────────────────
 
@@ -1268,7 +1275,7 @@ class SensorsTab(QWidget):
 
         self._sensors = loaded
         self._refresh_table()
-        self._table.selectRow(0)
+        self._select(0)
         print(f"Imported {len(loaded)} sensor(s) from {path}")
 
     # ── public API ───────────────────────────────────────────────────────────
