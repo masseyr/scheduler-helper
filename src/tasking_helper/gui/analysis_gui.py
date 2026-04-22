@@ -22,9 +22,9 @@ import numpy as np
 from PyQt6.QtCore import QObject, QThread, pyqtSignal, Qt
 from PyQt6.QtGui import QFont, QPalette, QColor, QLinearGradient, QPainter, QBrush
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QApplication, QCheckBox, QDoubleSpinBox, QFileDialog,
-    QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
-    QMainWindow, QMessageBox, QPushButton, QProgressBar,
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDoubleSpinBox,
+    QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel,
+    QLineEdit, QMainWindow, QMessageBox, QPushButton, QProgressBar,
     QScrollArea, QSizePolicy, QSplitter, QTableWidget, QTableWidgetItem,
     QTabWidget, QTextEdit, QVBoxLayout, QWidget,
 )
@@ -149,6 +149,8 @@ _SENSOR_TYPE_DEFS: dict[str, dict] = {
 
 _SENSOR_TYPE_NAMES = list(_SENSOR_TYPE_DEFS.keys())
 
+_FOR_SHAPES = ["Open", "Rectangular", "Elliptical", "Custom"]
+
 # Columns shown in the Sensors overview table
 _SENSOR_TABLE_COLS: list[tuple[str, str]] = [
     ("name",          "Name"),
@@ -168,6 +170,13 @@ def _default_sensor(name: str = "Sensor 1",
     d: dict = {"name": name, "sensor_type": sensor_type}
     for key, _, default, *_ in _SENSOR_TYPE_DEFS[sensor_type]["params"]:
         d[key] = float(default)
+    # Field-of-regard defaults
+    d["for_shape"]          = "Open"
+    d["for_boresight_az"]   = 0.0
+    d["for_boresight_el"]   = 90.0
+    d["for_width_deg"]      = 10.0
+    d["for_height_deg"]     = 10.0
+    d["for_custom_points"]  = []
     return d
 
 
@@ -666,6 +675,224 @@ class ParameterPanel(QWidget):
             QMessageBox.warning(self, "Import warnings", msg)
 
 
+_BTN_STYLE = (
+    "QPushButton { border: 1px solid #bbb; border-radius: 3px; padding: 3px 10px; }"
+    "QPushButton:hover   { background: #e3f2fd; }"
+    "QPushButton:pressed { background: #bbdefb; }"
+    "QPushButton:disabled{ color: #aaa; }"
+)
+
+
+# ─── field-of-regard editor ───────────────────────────────────────────────────
+
+class FieldOfRegardEditor(QWidget):
+    """
+    FoR shape selector + boresight/dimension inputs + custom Az/El point list.
+    Embeds inside TypedSensorEditor below the type-tabs.
+    """
+
+    changed = pyqtSignal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._blocked = False
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        box = QGroupBox("Field of Regard")
+        vbl = QVBoxLayout(box)
+        vbl.setSpacing(4)
+        vbl.setContentsMargins(6, 4, 6, 6)
+
+        # ── shape selector ────────────────────────────────────────────────────
+        shape_row = QWidget()
+        srl = QHBoxLayout(shape_row)
+        srl.setContentsMargins(0, 0, 0, 0)
+        lbl_shape = QLabel("Shape:")
+        lbl_shape.setMinimumWidth(90)
+        lbl_shape.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self._shape_combo = QComboBox()
+        self._shape_combo.addItems(_FOR_SHAPES)
+        self._shape_combo.setFixedWidth(130)
+        srl.addWidget(lbl_shape)
+        srl.addSpacing(6)
+        srl.addWidget(self._shape_combo)
+        srl.addStretch()
+        vbl.addWidget(shape_row)
+
+        # ── numeric fields (boresight + dims) ─────────────────────────────────
+        self._for_form = QFormLayout()
+        self._for_form.setSpacing(4)
+        self._for_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        self._for_form.setContentsMargins(0, 2, 0, 2)
+
+        def _sb(lo: float, hi: float, dec: int, step: float, val: float) -> QDoubleSpinBox:
+            sb = QDoubleSpinBox()
+            sb.setRange(lo, hi)
+            sb.setDecimals(dec)
+            sb.setSingleStep(step)
+            sb.setValue(val)
+            sb.setMinimumWidth(90)
+            sb.valueChanged.connect(self._on_value_changed)
+            return sb
+
+        self._bs_az  = _sb(-360.0, 360.0, 1, 1.0,  0.0)
+        self._bs_el  = _sb( -90.0,  90.0, 1, 1.0, 90.0)
+        self._width  = _sb(   0.0, 360.0, 2, 0.5, 10.0)
+        self._height = _sb(   0.0, 180.0, 2, 0.5, 10.0)
+
+        def _unit_row(sb: QDoubleSpinBox, unit: str) -> QWidget:
+            w = QWidget()
+            hl = QHBoxLayout(w)
+            hl.setContentsMargins(0, 0, 0, 0)
+            hl.addWidget(sb)
+            hl.addWidget(_UnitLabel(unit))
+            hl.addStretch()
+            return w
+
+        self._bs_az_row  = _unit_row(self._bs_az,  "deg")
+        self._bs_el_row  = _unit_row(self._bs_el,  "deg")
+        self._width_row  = _unit_row(self._width,  "deg")
+        self._height_row = _unit_row(self._height, "deg")
+
+        self._for_form.addRow("Boresight Az:", self._bs_az_row)
+        self._for_form.addRow("Boresight El:", self._bs_el_row)
+        self._for_form.addRow("Width:",        self._width_row)
+        self._for_form.addRow("Height:",       self._height_row)
+        vbl.addLayout(self._for_form)
+
+        # ── custom Az/El point table ──────────────────────────────────────────
+        self._custom_widget = QWidget()
+        cvl = QVBoxLayout(self._custom_widget)
+        cvl.setContentsMargins(0, 4, 0, 0)
+        cvl.setSpacing(4)
+
+        pt_lbl = QLabel("Az / El coordinate pairs (deg):")
+        pt_lbl.setStyleSheet("font-size:11px; color:#555;")
+        cvl.addWidget(pt_lbl)
+
+        self._pt_table = QTableWidget(0, 2)
+        self._pt_table.setHorizontalHeaderLabels(["Az (deg)", "El (deg)"])
+        self._pt_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch)
+        self._pt_table.verticalHeader().setVisible(False)
+        self._pt_table.setMinimumHeight(100)
+        self._pt_table.setMaximumHeight(200)
+        self._pt_table.setAlternatingRowColors(True)
+        self._pt_table.itemChanged.connect(self._on_value_changed)
+        cvl.addWidget(self._pt_table)
+
+        pt_btns = QHBoxLayout()
+        self._add_pt_btn = QPushButton("+ Add Point")
+        self._rem_pt_btn = QPushButton("− Remove")
+        for b in (self._add_pt_btn, self._rem_pt_btn):
+            b.setFixedHeight(24)
+            b.setStyleSheet(_BTN_STYLE)
+            pt_btns.addWidget(b)
+        pt_btns.addStretch()
+        self._add_pt_btn.clicked.connect(self._add_point)
+        self._rem_pt_btn.clicked.connect(self._remove_point)
+        cvl.addLayout(pt_btns)
+
+        vbl.addWidget(self._custom_widget)
+        root.addWidget(box)
+
+        # wire shape change after all widgets exist
+        self._shape_combo.currentTextChanged.connect(self._on_shape_changed)
+        self._on_shape_changed(_FOR_SHAPES[0])
+
+    # ── internal ─────────────────────────────────────────────────────────────
+
+    def _on_value_changed(self) -> None:
+        if not self._blocked:
+            self.changed.emit()
+
+    def _on_shape_changed(self, shape: str) -> None:
+        show_bs   = shape != "Open"
+        show_dims = shape in ("Rectangular", "Elliptical")
+        show_cust = shape == "Custom"
+
+        for row_w in (self._bs_az_row, self._bs_el_row):
+            row_w.setVisible(show_bs)
+            lbl = self._for_form.labelForField(row_w)
+            if lbl:
+                lbl.setVisible(show_bs)
+
+        for row_w in (self._width_row, self._height_row):
+            row_w.setVisible(show_dims)
+            lbl = self._for_form.labelForField(row_w)
+            if lbl:
+                lbl.setVisible(show_dims)
+
+        self._custom_widget.setVisible(show_cust)
+        if not self._blocked:
+            self.changed.emit()
+
+    def _add_point(self) -> None:
+        r = self._pt_table.rowCount()
+        self._pt_table.insertRow(r)
+        self._pt_table.setItem(r, 0, QTableWidgetItem("0.0"))
+        self._pt_table.setItem(r, 1, QTableWidgetItem("0.0"))
+
+    def _remove_point(self) -> None:
+        rows = sorted({idx.row() for idx in self._pt_table.selectedItems()},
+                      reverse=True)
+        if not rows:
+            rc = self._pt_table.rowCount()
+            if rc > 0:
+                rows = [rc - 1]
+        for r in rows:
+            self._pt_table.removeRow(r)
+        self._on_value_changed()
+
+    def _get_custom_points(self) -> list[list[float]]:
+        pts: list[list[float]] = []
+        for r in range(self._pt_table.rowCount()):
+            try:
+                az = float((self._pt_table.item(r, 0) or QTableWidgetItem("0")).text())
+                el = float((self._pt_table.item(r, 1) or QTableWidgetItem("0")).text())
+                pts.append([az, el])
+            except ValueError:
+                pass
+        return pts
+
+    # ── public API ────────────────────────────────────────────────────────────
+
+    def get_for(self) -> dict:
+        return {
+            "for_shape":         self._shape_combo.currentText(),
+            "for_boresight_az":  self._bs_az.value(),
+            "for_boresight_el":  self._bs_el.value(),
+            "for_width_deg":     self._width.value(),
+            "for_height_deg":    self._height.value(),
+            "for_custom_points": self._get_custom_points(),
+        }
+
+    def set_for(self, sensor: dict) -> None:
+        self._blocked = True
+        shape = sensor.get("for_shape", "Open")
+        if shape not in _FOR_SHAPES:
+            shape = "Open"
+        self._shape_combo.setCurrentText(shape)
+        self._bs_az.setValue(float(sensor.get("for_boresight_az",  0.0)))
+        self._bs_el.setValue(float(sensor.get("for_boresight_el", 90.0)))
+        self._width.setValue(float(sensor.get("for_width_deg",    10.0)))
+        self._height.setValue(float(sensor.get("for_height_deg",  10.0)))
+        pts = sensor.get("for_custom_points", [])
+        self._pt_table.blockSignals(True)
+        self._pt_table.setRowCount(0)
+        for az, el in (pts if isinstance(pts, list) else []):
+            r = self._pt_table.rowCount()
+            self._pt_table.insertRow(r)
+            self._pt_table.setItem(r, 0, QTableWidgetItem(str(az)))
+            self._pt_table.setItem(r, 1, QTableWidgetItem(str(el)))
+        self._pt_table.blockSignals(False)
+        self._blocked = False
+        self._on_shape_changed(shape)
+
+
 # ─── typed sensor editor (one tab per sensor type) ───────────────────────────
 
 class TypedSensorEditor(QWidget):
@@ -710,6 +937,11 @@ class TypedSensorEditor(QWidget):
         self._type_tabs.currentChanged.connect(self._on_tab_changed)
         layout.addWidget(self._type_tabs)
 
+        # Field-of-regard editor below the type tabs
+        self._for_editor = FieldOfRegardEditor()
+        self._for_editor.changed.connect(self._on_value_changed)
+        layout.addWidget(self._for_editor)
+
     def _on_value_changed(self) -> None:
         if not self._blocked:
             self.changed.emit()
@@ -721,9 +953,11 @@ class TypedSensorEditor(QWidget):
     def get_sensor_type(self) -> str:
         return self._type_tabs.tabText(self._type_tabs.currentIndex())
 
-    def get_params(self) -> dict[str, float]:
+    def get_params(self) -> dict:
         stype = self.get_sensor_type()
-        return {k: sb.value() for k, sb in self._tab_spinboxes[stype].items()}
+        params = {k: sb.value() for k, sb in self._tab_spinboxes[stype].items()}
+        params.update(self._for_editor.get_for())
+        return params
 
     def set_sensor(self, sensor: dict) -> None:
         self._blocked = True
@@ -736,16 +970,10 @@ class TypedSensorEditor(QWidget):
             if k in sensor:
                 sb.setValue(float(sensor[k]))
         self._blocked = False
+        self._for_editor.set_for(sensor)
 
 
 # ─── sensors tab ─────────────────────────────────────────────────────────────
-
-_BTN_STYLE = (
-    "QPushButton { border: 1px solid #bbb; border-radius: 3px; padding: 3px 10px; }"
-    "QPushButton:hover   { background: #e3f2fd; }"
-    "QPushButton:pressed { background: #bbdefb; }"
-    "QPushButton:disabled{ color: #aaa; }"
-)
 
 
 class SensorsTab(QWidget):
@@ -954,7 +1182,8 @@ class SensorsTab(QWidget):
         key
         for td in _SENSOR_TYPE_DEFS.values()
         for key, *_ in td["params"]
-    ))
+    )) + ["for_shape", "for_boresight_az", "for_boresight_el",
+           "for_width_deg", "for_height_deg", "for_custom_points"]
 
     def _export_csv(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
@@ -962,13 +1191,20 @@ class SensorsTab(QWidget):
             "CSV files (*.csv);;All files (*)")
         if not path:
             return
-        import csv
+        import csv, json
         try:
             with open(path, "w", newline="", encoding="utf-8") as fh:
                 writer = csv.DictWriter(fh, fieldnames=self._CSV_KEYS,
                                         extrasaction="ignore")
                 writer.writeheader()
-                writer.writerows(self._sensors)
+                # Serialize for_custom_points list as JSON string for the cell
+                rows = []
+                for s in self._sensors:
+                    row = dict(s)
+                    row["for_custom_points"] = json.dumps(
+                        s.get("for_custom_points", []))
+                    rows.append(row)
+                writer.writerows(rows)
             print(f"Exported {len(self._sensors)} sensor(s) → {path}")
         except OSError as exc:
             QMessageBox.critical(self, "Export failed", str(exc))
@@ -979,7 +1215,7 @@ class SensorsTab(QWidget):
             "CSV files (*.csv);;All files (*)")
         if not path:
             return
-        import csv
+        import csv, json
         loaded: list[dict] = []
         try:
             with open(path, newline="", encoding="utf-8") as fh:
@@ -995,6 +1231,24 @@ class SensorsTab(QWidget):
                                 sensor[key] = float(row[key])
                             except ValueError:
                                 pass
+                    # FoR scalar fields
+                    for key in ("for_shape",):
+                        if row.get(key):
+                            sensor[key] = row[key]
+                    for key in ("for_boresight_az", "for_boresight_el",
+                                "for_width_deg", "for_height_deg"):
+                        if row.get(key):
+                            try:
+                                sensor[key] = float(row[key])
+                            except ValueError:
+                                pass
+                    # FoR custom points (JSON list)
+                    raw_pts = row.get("for_custom_points", "")
+                    if raw_pts:
+                        try:
+                            sensor["for_custom_points"] = json.loads(raw_pts)
+                        except (ValueError, TypeError):
+                            pass
                     loaded.append(sensor)
         except OSError as exc:
             QMessageBox.critical(self, "Import failed", str(exc))
