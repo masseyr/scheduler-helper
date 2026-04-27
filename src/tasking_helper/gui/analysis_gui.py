@@ -15,8 +15,10 @@ Requires: PyQt6, matplotlib, numpy
 
 from __future__ import annotations
 
+import os
 import sys
 import math
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
 from PyQt6.QtCore import QObject, QThread, pyqtSignal, Qt
@@ -25,7 +27,7 @@ from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDoubleSpinBox,
     QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel,
     QLineEdit, QMainWindow, QMessageBox, QPushButton, QProgressBar,
-    QScrollArea, QSizePolicy, QSplitter, QTableWidget, QTableWidgetItem,
+    QScrollArea, QSizePolicy, QSlider, QSplitter, QTableWidget, QTableWidgetItem,
     QTabWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
@@ -1535,6 +1537,60 @@ def _parse_float_list(
     return out
 
 
+def _sweep_combo_task(args: dict) -> dict:
+    """
+    Top-level picklable function executed by ProcessPoolExecutor workers.
+    Computes SNR/vmag/visibility for one (diam, alb) combo across all sensors.
+    args keys: diam, alb, sensors, above_el, illuminated, ranges, n_steps
+    """
+    diam        = args["diam"]
+    alb         = args["alb"]
+    sensors     = args["sensors"]
+    above_el    = args["above_el"]
+    illuminated = args["illuminated"]
+    ranges      = args["ranges"]
+    n_steps     = args["n_steps"]
+
+    sensor_data: list[dict] = []
+    for sensor in sensors:
+        snrs    = np.full(n_steps, np.nan)
+        vmags   = np.full(n_steps, np.nan)
+        visible = np.zeros(n_steps, dtype=bool)
+        is_radar = sensor.get("sensor_type") == "Radar"
+        active   = above_el if is_radar else (above_el & illuminated)
+        for idx in np.where(active)[0]:
+            rng = float(ranges[idx])
+            if is_radar:
+                snr = _compute_snr_radar(
+                    rng, diam,
+                    sensor["freq_ghz"], sensor["power_kw"],
+                    sensor["ant_gain_db"], sensor["pulse_us"],
+                    sensor["noise_fig_db"], sensor["n_pulses"],
+                    sensor["losses_db"],
+                )
+                snrs[idx]    = snr
+                visible[idx] = snr >= sensor["snr_threshold"]
+            else:
+                snr = _compute_snr(rng, diam, alb,
+                                   sensor["aperture_m"], sensor["exposure_s"],
+                                   sensor["qe"], sensor["read_noise_e"],
+                                   sensor["loop_gain_db"])
+                vm  = _compute_vizmag(rng, diam, alb)
+                snrs[idx]    = snr
+                vmags[idx]   = vm
+                visible[idx] = (snr >= sensor["snr_threshold"]
+                                and vm <= sensor.get("vizmag_limit", 99.0))
+        sensor_data.append(dict(name=sensor["name"],
+                                snrs=snrs, vmags=vmags, visible=visible))
+
+    return dict(
+        label   = f"D={diam:.3g} m, alb={alb:.3g}",
+        diam    = diam,
+        albedo  = alb,
+        sensors = sensor_data,
+    )
+
+
 class TargetSweepWorker(QObject):
     """Sweeps over (diameter × albedo) cross-product for all sensors."""
 
@@ -1548,12 +1604,14 @@ class TargetSweepWorker(QObject):
         sensors: list[dict],
         diameters: list[float],
         albedos: list[float],
+        n_workers: int = 1,
     ) -> None:
         super().__init__()
         self.scene_params = scene_params
         self.sensors      = sensors
         self.diameters    = diameters
         self.albedos      = albedos
+        self.n_workers    = max(1, n_workers)
         self._cancelled   = False
 
     def cancel(self) -> None:
@@ -1599,58 +1657,68 @@ class TargetSweepWorker(QObject):
                 self.progress.emit(int(idx / n_steps * 35),
                                    f"Sweep: orbit {idx}/{n_steps}")
 
-        above = (elevations >= p["min_el_deg"]) & illuminated
+        above_el    = elevations >= p["min_el_deg"]
 
         # Cross-product of diameters × albedos
         import itertools
-        combos = list(itertools.product(self.diameters, self.albedos))
+        combos   = list(itertools.product(self.diameters, self.albedos))
         n_combos = len(combos)
 
-        combo_results: list[dict] = []
-        for c_idx, (diam, alb) in enumerate(combos):
-            if self._cancelled:
-                break
-            pct = 36 + int(c_idx / n_combos * 60)
-            self.progress.emit(pct,
-                f"Sweep: D={diam:.3g} m  alb={alb:.3g}  ({c_idx+1}/{n_combos})")
+        # Build per-combo task argument dicts (shared arrays are read-only)
+        common = dict(
+            sensors     = self.sensors,
+            above_el    = above_el,
+            illuminated = illuminated,
+            ranges      = ranges,
+            n_steps     = n_steps,
+        )
+        task_args = [{**common, "diam": d, "alb": a} for d, a in combos]
 
-            sensor_data: list[dict] = []
-            for sensor in self.sensors:
-                snrs    = np.full(n_steps, np.nan)
-                vmags   = np.full(n_steps, np.nan)
-                visible = np.zeros(n_steps, dtype=bool)
-                for idx in np.where(above)[0]:
-                    rng = float(ranges[idx])
-                    snr = _compute_snr(rng, diam, alb, sensor["aperture_m"],
-                                       sensor["exposure_s"], sensor["qe"],
-                                       sensor["read_noise_e"], sensor["loop_gain_db"])
-                    vm  = _compute_vizmag(rng, diam, alb)
-                    snrs[idx]    = snr
-                    vmags[idx]   = vm
-                    visible[idx] = (snr >= sensor["snr_threshold"]
-                                    and vm <= sensor["vizmag_limit"])
-                sensor_data.append(dict(
-                    name    = sensor["name"],
-                    snrs    = snrs,
-                    vmags   = vmags,
-                    visible = visible,
-                ))
+        combo_results: list[dict | None] = [None] * n_combos
 
-            combo_results.append(dict(
-                label   = f"D={diam:.3g} m, alb={alb:.3g}",
-                diam    = diam,
-                albedo  = alb,
-                sensors = sensor_data,
-            ))
+        if self.n_workers <= 1:
+            for c_idx, args in enumerate(task_args):
+                if self._cancelled:
+                    break
+                pct = 36 + int(c_idx / n_combos * 60)
+                self.progress.emit(pct,
+                    f"Sweep: D={args['diam']:.3g} m  alb={args['alb']:.3g}"
+                    f"  ({c_idx + 1}/{n_combos})")
+                combo_results[c_idx] = _sweep_combo_task(args)
+        else:
+            self.progress.emit(36, f"Sweep: launching {self.n_workers} workers…")
+            try:
+                with ProcessPoolExecutor(max_workers=self.n_workers) as pool:
+                    fut_map = {pool.submit(_sweep_combo_task, a): i
+                               for i, a in enumerate(task_args)}
+                    done = 0
+                    for fut in as_completed(fut_map):
+                        if self._cancelled:
+                            pool.shutdown(wait=False, cancel_futures=True)
+                            break
+                        c_idx = fut_map[fut]
+                        combo_results[c_idx] = fut.result()
+                        done += 1
+                        pct = 36 + int(done / n_combos * 60)
+                        self.progress.emit(pct,
+                            f"Sweep: {done}/{n_combos} combos complete")
+            except Exception as exc:
+                # Workers failed (e.g. package not installed in sub-process):
+                # fall back to sequential
+                print(f"Parallel sweep failed ({exc}); retrying sequentially…")
+                for c_idx, args in enumerate(task_args):
+                    if self._cancelled:
+                        break
+                    combo_results[c_idx] = _sweep_combo_task(args)
 
         self.progress.emit(98, "Sweep: collating…")
         return dict(
-            times_min   = times / 60.0,
-            elevations  = elevations,
-            ranges      = ranges,
+            times_min    = times / 60.0,
+            elevations   = elevations,
+            ranges       = ranges,
             scene_params = p,
             sensor_names = [s["name"] for s in self.sensors],
-            combos      = combo_results,
+            combos       = [r for r in combo_results if r is not None],
         )
 
 
@@ -1696,8 +1764,32 @@ class TargetSweepPanel(QWidget):
             "multiple values are crossed with all diameters.")
         self._alb_edit.setPlaceholderText("e.g.  0.1, 0.3, 0.5")
 
+        # Workers slider
+        _n_cpu     = os.cpu_count() or 4
+        _max_work  = max(1, _n_cpu - 2)
+        self._workers_slider = QSlider(Qt.Orientation.Horizontal)
+        self._workers_slider.setRange(1, _max_work)
+        self._workers_slider.setValue(1)
+        self._workers_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self._workers_slider.setTickInterval(1)
+        self._workers_slider.setSingleStep(1)
+        self._workers_slider.setFixedWidth(120)
+        self._workers_val_lbl = QLabel("1")
+        self._workers_val_lbl.setFixedWidth(22)
+        self._workers_val_lbl.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self._workers_slider.valueChanged.connect(
+            lambda v: self._workers_val_lbl.setText(str(v)))
+        workers_row = QWidget()
+        wrl = QHBoxLayout(workers_row)
+        wrl.setContentsMargins(0, 0, 0, 0)
+        wrl.addWidget(self._workers_slider)
+        wrl.addWidget(self._workers_val_lbl)
+        wrl.addStretch()
         form.addRow("Diameters (m):", self._diam_edit)
         form.addRow("Albedos:", self._alb_edit)
+        form.addRow(
+            f"Parallel workers (1–{_max_work}):", workers_row)
         root.addWidget(inp)
 
         # ── run bar ──────────────────────────────────────────────────────────
@@ -1775,7 +1867,8 @@ class TargetSweepPanel(QWidget):
             return
 
         self._worker = TargetSweepWorker(
-            self._scene_params, self._sensors, diameters, albedos)
+            self._scene_params, self._sensors, diameters, albedos,
+            n_workers=self._workers_slider.value())
         self._thread = QThread(self)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
@@ -2191,6 +2284,10 @@ class MainWindow(QMainWindow):
 # ─── entry point ──────────────────────────────────────────────────────────────
 
 def main(argv: list[str] | None = None) -> int:
+    # Required for ProcessPoolExecutor on Windows (frozen or script entry points)
+    import multiprocessing
+    multiprocessing.freeze_support()
+
     app = QApplication(argv or sys.argv)
     app.setApplicationName("EO Analysis")
     app.setStyle("Fusion")
