@@ -1,7 +1,7 @@
 """
 tasking_helper/gui/analysis_gui.py
 ═══════════════════════════════════
-PyQt6 GUI — EO ground-station sensor analysis.
+PySide6 GUI — EO ground-station sensor analysis.
 
 Propagates a Keplerian orbit, computes visibility windows, SNR, and visual
 magnitude for one or more electro-optical ground sensors tracking a space object.
@@ -10,7 +10,7 @@ Run standalone:
     python -m tasking_helper.gui.analysis_gui
     python src/tasking_helper/gui/analysis_gui.py
 
-Requires: PyQt6, matplotlib, numpy
+Requires: PySide6, matplotlib, numpy
 """
 
 from __future__ import annotations
@@ -21,9 +21,9 @@ import math
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
-from PyQt6.QtCore import QObject, QThread, pyqtSignal, Qt
-from PyQt6.QtGui import QFont, QPalette, QColor, QLinearGradient, QPainter, QBrush
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import QObject, QThread, Signal, Qt
+from PySide6.QtGui import QFont, QColor, QLinearGradient, QPainter, QBrush
+from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDoubleSpinBox,
     QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel,
     QLineEdit, QMainWindow, QMessageBox, QPushButton, QProgressBar,
@@ -36,8 +36,8 @@ from matplotlib.figure import Figure
 # ─── scene / sensor parameter specs ──────────────────────────────────────────
 # Each entry: (key, label, default, lo, hi, decimals, step, unit, tooltip)
 
-_SCENE_PARAM_GROUPS: list[tuple[str, list]] = [
-    ("Orbit (observed object)", [
+_SCENE_PARAM_GROUPS: dict[str, list] = {
+    "Orbit (observed object)": [
         ("alt_km",   "Altitude",          550.0,  160.0, 36000.0, 1,  10.0, "km",
          "Mean orbital altitude above Earth's surface"),
         ("incl_deg", "Inclination",        97.6,    0.0,   180.0, 2,   1.0, "deg",
@@ -50,14 +50,14 @@ _SCENE_PARAM_GROUPS: list[tuple[str, list]] = [
          "Argument of perigee"),
         ("m0_deg",   "Mean Anomaly",       0.0,    0.0,   360.0, 2,   1.0, "deg",
          "Mean anomaly at epoch"),
-    ]),
-    ("Target", [
+    ],
+    "Target": [
         ("target_diam_m", "Diameter",     1.0,   0.01,  100.0, 2,  0.10, "m",
          "Effective cross-section diameter of the target"),
         ("albedo",        "Albedo",       0.30,   0.0,    1.0,  3,  0.05, "",
          "Diffuse (Lambertian) reflectance, 0–1"),
-    ]),
-    ("Observer / Location", [
+    ],
+    "Observer / Location": [
         ("obs_lat_deg", "Latitude",       51.5,  -90.0,   90.0, 2,  1.0, "deg",
          "Observer geodetic latitude"),
         ("obs_lon_deg", "Longitude",      -0.1, -180.0,  180.0, 2,  1.0, "deg",
@@ -66,14 +66,14 @@ _SCENE_PARAM_GROUPS: list[tuple[str, list]] = [
          "Observer altitude above WGS-84 ellipsoid"),
         ("min_el_deg",  "Min. Elevation", 10.0,   0.0,   90.0,  1,  1.0, "deg",
          "Minimum elevation angle for a visible pass"),
-    ]),
-    ("Simulation", [
+    ],
+    "Simulation": [
         ("duration_min", "Duration",     120.0,  10.0, 1440.0, 0,  10.0, "min",
          "Total simulation duration"),
         ("step_sec",     "Time Step",     10.0,   1.0,   60.0, 1,   1.0, "s",
          "Propagation step size"),
-    ]),
-]
+    ],
+}
 
 # Each entry: (key, label, default, lo, hi, decimals, step, unit, tooltip)
 _SENSOR_TYPE_DEFS: dict[str, dict] = {
@@ -145,6 +145,50 @@ _SENSOR_TYPE_DEFS: dict[str, dict] = {
              "Sensor spacecraft orbital altitude"),
             ("sensor_incl_deg", "Sensor Incl.", 98.0,  0.0,  180.0, 1,  1.0, "deg",
              "Sensor spacecraft orbital inclination"),
+        ],
+    },
+    "SWIR": {
+        "params": [
+            ("aperture_m",    "Aperture",      0.15,  0.01,    2.0, 3, 0.05, "m",
+             "Lens / mirror clear aperture diameter"),
+            ("focal_len_mm",  "Focal Length",  500.0, 50.0, 5000.0, 0, 50.0, "mm",
+             "Effective focal length"),
+            ("pixel_um",      "Pixel Pitch",   15.0,   5.0,   50.0, 1,  1.0, "µm",
+             "Detector pixel pitch"),
+            ("wavelength_um", "Wavelength",     1.6,   1.0,    2.5, 2,  0.1, "µm",
+             "Central operating wavelength (SWIR: 1–2.5 µm)"),
+            ("exposure_s",    "Exposure",       0.01,  1e-5,  10.0, 4, 0.005, "s",
+             "Single-frame integration time"),
+            ("qe",            "Quantum Eff.",   0.70,  0.05,   1.0, 2,  0.05, "",
+             "Detector quantum efficiency at operating wavelength"),
+            ("read_noise_e",  "Read Noise",    50.0,   0.0,  500.0, 0,  5.0, "e⁻",
+             "RMS read noise per pixel"),
+            ("snr_threshold", "SNR Threshold",  5.0,   1.0,  100.0, 1,  0.5, "",
+             "Minimum SNR required for detection"),
+            ("vizmag_limit",  "Vmag Limit",    14.0,   5.0,   25.0, 1,  0.5, "mag",
+             "Faint limiting magnitude (SWIR band)"),
+            ("loop_gain_db",  "Loop Gain",      0.0,   0.0,   40.0, 1,  1.0, "dB",
+             "Optical / electronic loop gain applied to signal"),
+        ],
+    },
+    "LWIR": {
+        "params": [
+            ("aperture_m",    "Aperture",      0.10,  0.01,    1.0, 3, 0.01, "m",
+             "Lens / mirror clear aperture diameter"),
+            ("focal_len_mm",  "Focal Length",  100.0, 25.0, 1000.0, 0, 25.0, "mm",
+             "Effective focal length"),
+            ("pixel_um",      "Pixel Pitch",   17.0,   5.0,   50.0, 1,  1.0, "µm",
+             "Detector pixel pitch"),
+            ("wavelength_um", "Wavelength",    10.0,   8.0,   14.0, 1,  0.5, "µm",
+             "Central operating wavelength (LWIR: 8–14 µm)"),
+            ("netd_mk",       "NETD",          50.0,   1.0,  500.0, 0,  5.0, "mK",
+             "Noise equivalent temperature difference"),
+            ("integration_ms","Integration",   10.0,   0.1,  100.0, 1,  1.0, "ms",
+             "Detector integration time per frame"),
+            ("frame_rate_hz", "Frame Rate",    30.0,   1.0,  200.0, 0,  1.0, "Hz",
+             "Detector frame rate"),
+            ("snr_threshold", "SNR Threshold",  5.0,   1.0,  100.0, 1,  0.5, "",
+             "Minimum SNR required for detection"),
         ],
     },
 }
@@ -325,9 +369,9 @@ def _compute_snr_radar(
 # ─── analysis worker ──────────────────────────────────────────────────────────
 
 class AnalysisWorker(QObject):
-    progress = pyqtSignal(int, str)
-    finished = pyqtSignal(dict)
-    error    = pyqtSignal(str)
+    progress = Signal(int, str)
+    finished = Signal(dict)
+    error    = Signal(str)
 
     def __init__(self, scene_params: dict, sensors: list[dict]) -> None:
         super().__init__()
@@ -514,13 +558,13 @@ def _make_param_form(
 # Mapping from _SCENE_PARAM_GROUPS display name → config file section name
 _SCENE_CONFIG_SECTIONS: dict[str, str] = {
     g: g.split("(")[0].strip().replace(" / ", " ").rstrip()
-    for g, _ in _SCENE_PARAM_GROUPS
+    for g in _SCENE_PARAM_GROUPS
 }
 # e.g. "Orbit (observed object)" → "Orbit"
 #      "Observer / Location"     → "Observer  Location" → we clean up below
 _SCENE_CONFIG_SECTIONS = {
     g: g.split("(")[0].strip().replace(" / ", "_")
-    for g, _ in _SCENE_PARAM_GROUPS
+    for g in _SCENE_PARAM_GROUPS
 }
 
 
@@ -576,7 +620,7 @@ class ParameterPanel(QWidget):
 
         self._spinboxes: dict[str, QDoubleSpinBox] = {}
 
-        for group_name, params in _SCENE_PARAM_GROUPS:
+        for group_name, params in _SCENE_PARAM_GROUPS.items():
             box = QGroupBox(group_name)
             vl  = QVBoxLayout(box)
             vl.setContentsMargins(6, 4, 6, 4)
@@ -613,7 +657,7 @@ class ParameterPanel(QWidget):
             "exported":  datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "generator": "tasking_helper.gui",
         }
-        for group_name, params in _SCENE_PARAM_GROUPS:
+        for group_name, params in _SCENE_PARAM_GROUPS.items():
             section = _SCENE_CONFIG_SECTIONS[group_name]
             cfg[section] = {
                 key: repr(self._spinboxes[key].value())
@@ -653,7 +697,7 @@ class ParameterPanel(QWidget):
                 f"{self._CONFIG_VERSION!r}. Values will be loaded anyway.")
 
         loaded = errors = 0
-        for group_name, params in _SCENE_PARAM_GROUPS:
+        for group_name, params in _SCENE_PARAM_GROUPS.items():
             section = _SCENE_CONFIG_SECTIONS[group_name]
             if section not in cfg:
                 continue
@@ -693,7 +737,7 @@ class FieldOfRegardEditor(QWidget):
     Embeds inside TypedSensorEditor below the type-tabs.
     """
 
-    changed = pyqtSignal()
+    changed = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -783,6 +827,10 @@ class FieldOfRegardEditor(QWidget):
         self._pt_table.setMinimumHeight(100)
         self._pt_table.setMaximumHeight(200)
         self._pt_table.setAlternatingRowColors(True)
+        self._pt_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.DoubleClicked |
+            QAbstractItemView.EditTrigger.EditKeyPressed |
+            QAbstractItemView.EditTrigger.AnyKeyPressed)
         self._pt_table.itemChanged.connect(self._on_value_changed)
         cvl.addWidget(self._pt_table)
 
@@ -833,10 +881,18 @@ class FieldOfRegardEditor(QWidget):
             self.changed.emit()
 
     def _add_point(self) -> None:
+        self._pt_table.blockSignals(True)
         r = self._pt_table.rowCount()
         self._pt_table.insertRow(r)
-        self._pt_table.setItem(r, 0, QTableWidgetItem("0.0"))
-        self._pt_table.setItem(r, 1, QTableWidgetItem("0.0"))
+        item_az = QTableWidgetItem("0.0")
+        item_el = QTableWidgetItem("0.0")
+        item_az.setFlags(item_az.flags() | Qt.ItemFlag.ItemIsEditable)
+        item_el.setFlags(item_el.flags() | Qt.ItemFlag.ItemIsEditable)
+        self._pt_table.setItem(r, 0, item_az)
+        self._pt_table.setItem(r, 1, item_el)
+        self._pt_table.blockSignals(False)
+        self._pt_table.setCurrentCell(r, 0)
+        self._on_value_changed()
 
     def _remove_point(self) -> None:
         rows = sorted({idx.row() for idx in self._pt_table.selectedItems()},
@@ -888,8 +944,12 @@ class FieldOfRegardEditor(QWidget):
         for az, el in (pts if isinstance(pts, list) else []):
             r = self._pt_table.rowCount()
             self._pt_table.insertRow(r)
-            self._pt_table.setItem(r, 0, QTableWidgetItem(str(az)))
-            self._pt_table.setItem(r, 1, QTableWidgetItem(str(el)))
+            item_az = QTableWidgetItem(str(az))
+            item_el = QTableWidgetItem(str(el))
+            item_az.setFlags(item_az.flags() | Qt.ItemFlag.ItemIsEditable)
+            item_el.setFlags(item_el.flags() | Qt.ItemFlag.ItemIsEditable)
+            self._pt_table.setItem(r, 0, item_az)
+            self._pt_table.setItem(r, 1, item_el)
         self._pt_table.blockSignals(False)
         self._blocked = False
         self._on_shape_changed(shape)
@@ -903,7 +963,7 @@ class TypedSensorEditor(QWidget):
     Switching tabs changes the active sensor type.
     """
 
-    changed = pyqtSignal()
+    changed = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1110,6 +1170,7 @@ class SensorsTab(QWidget):
         self._del_btn.setEnabled(len(self._sensors) > 1)
 
     def _update_table_row(self, row: int, sensor: dict) -> None:
+        self._table.blockSignals(True)
         for col, (key, _) in enumerate(_SENSOR_TABLE_COLS):
             raw = sensor.get(key)
             if raw is None:
@@ -1131,6 +1192,7 @@ class SensorsTab(QWidget):
                 font.setBold(True)
                 item.setFont(font)
             self._table.setItem(row, col, item)
+        self._table.blockSignals(False)
 
     def _load_sensor_into_editor(self, idx: int) -> None:
         sensor = self._sensors[idx]
@@ -1200,18 +1262,19 @@ class SensorsTab(QWidget):
             "CSV files (*.csv);;All files (*)")
         if not path:
             return
-        import csv, json
+        import csv
         try:
             with open(path, "w", newline="", encoding="utf-8") as fh:
                 writer = csv.DictWriter(fh, fieldnames=self._CSV_KEYS,
                                         extrasaction="ignore")
                 writer.writeheader()
-                # Serialize for_custom_points list as JSON string for the cell
                 rows = []
                 for s in self._sensors:
                     row = dict(s)
-                    row["for_custom_points"] = json.dumps(
-                        s.get("for_custom_points", []))
+                    pts = s.get("for_custom_points", [])
+                    row["for_custom_points"] = (
+                        "[" + " ".join(f"[{az} {el}]" for az, el in pts) + "]"
+                        if pts else "")
                     rows.append(row)
                 writer.writerows(rows)
             print(f"Exported {len(self._sensors)} sensor(s) → {path}")
@@ -1224,7 +1287,7 @@ class SensorsTab(QWidget):
             "CSV files (*.csv);;All files (*)")
         if not path:
             return
-        import csv, json
+        import csv
         loaded: list[dict] = []
         try:
             with open(path, newline="", encoding="utf-8") as fh:
@@ -1251,12 +1314,17 @@ class SensorsTab(QWidget):
                                 sensor[key] = float(row[key])
                             except ValueError:
                                 pass
-                    # FoR custom points (JSON list)
-                    raw_pts = row.get("for_custom_points", "")
+                    # FoR custom points: "[[az el] [az el] …]"
+                    raw_pts = row.get("for_custom_points", "").strip()
                     if raw_pts:
                         try:
-                            sensor["for_custom_points"] = json.loads(raw_pts)
-                        except (ValueError, TypeError):
+                            import re as _re
+                            pairs = _re.findall(
+                                r'\[\s*([+-]?\d+\.?\d*)\s+([+-]?\d+\.?\d*)\s*\]',
+                                raw_pts)
+                            sensor["for_custom_points"] = [
+                                [float(a), float(b)] for a, b in pairs]
+                        except ValueError:
                             pass
                     loaded.append(sensor)
         except OSError as exc:
@@ -1594,9 +1662,9 @@ def _sweep_combo_task(args: dict) -> dict:
 class TargetSweepWorker(QObject):
     """Sweeps over (diameter × albedo) cross-product for all sensors."""
 
-    progress = pyqtSignal(int, str)
-    finished = pyqtSignal(dict)
-    error    = pyqtSignal(str)
+    progress = Signal(int, str)
+    finished = Signal(dict)
+    error    = Signal(str)
 
     def __init__(
         self,
@@ -2017,7 +2085,7 @@ class TargetSweepPanel(QWidget):
 class StdoutRedirector(QObject):
     """Intercepts sys.stdout writes and re-emits them as a Qt signal."""
 
-    text_written = pyqtSignal(str)
+    text_written = Signal(str)
 
     def write(self, text: str) -> None:
         if text:
@@ -2290,13 +2358,7 @@ def main(argv: list[str] | None = None) -> int:
 
     app = QApplication(argv or sys.argv)
     app.setApplicationName("EO Analysis")
-    app.setStyle("Fusion")
-    pal = app.palette()
-    pal.setColor(QPalette.ColorRole.Window,        QColor("#f5f5f5"))
-    pal.setColor(QPalette.ColorRole.WindowText,    QColor("#212121"))
-    pal.setColor(QPalette.ColorRole.Base,          QColor("#ffffff"))
-    pal.setColor(QPalette.ColorRole.AlternateBase, QColor("#fafafa"))
-    app.setPalette(pal)
+    app.setStyle("windowsvista")
     win = MainWindow()
     win.show()
     return app.exec()

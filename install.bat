@@ -63,8 +63,8 @@ if errorlevel 1 goto :fail
 
 :: ── 5. Install optional extras ───────────────────────────────────────────────
 if "%NO_GUI%"=="0" (
-    echo Installing GUI dependencies (PyQt6, matplotlib) ...
-    pip install PyQt6 matplotlib --quiet
+    echo Installing GUI dependencies (PySide6, matplotlib) ...
+    pip install PySide6 matplotlib --quiet
     if errorlevel 1 (
         echo WARNING: GUI dependencies failed. The GUI will not be available.
     )
