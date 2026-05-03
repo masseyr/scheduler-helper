@@ -1,13 +1,15 @@
 """
 moon_eci — Moon ECI/ECR state vectors via truncated ELP2000/82 series.
 
-Implements Meeus "Astronomical Algorithms" 2nd ed., Chapter 47.
+Implements Meeus "Astronomical Algorithms" 2nd ed., Chapters 22 and 47.
 Includes the full 60-term tables for longitude/distance and latitude,
-plus IAU 1976 precession to rotate from mean-equatorial-of-date to J2000.0.
+IAU 1976 precession, and IAU 1980 nutation (63-term table).
 
-Typical accuracy over 2025–2050:
-  position  ≲ 20 km  (series truncation + no nutation-in-longitude applied)
+Typical accuracy over 2025–2050 (vs JPL DE432s):
+  position  ≲ 100 km  (truncated ELP2000/82 inherent; epoch-dependent)
   velocity  ≲ 0.2 m/s  (central finite-difference, dt = 1 s)
+
+For position accuracy < 10 km use moon_jpl.py (JPL DE kernel).
 
 Dependencies: numpy, .jdate (datetime_to_jd)
 
@@ -179,6 +181,78 @@ _TABLE_B = (
 )
 
 
+# ── IAU 1980 nutation table (Meeus Table 22.A, 63 terms) ─────────────────────
+# Columns: l  l'  F  D  Ω | ψ_sin  ψ_T×10 | ε_cos  ε_T×10
+# All coefficients in units of 0.0001 arcsec (or 0.0001 arcsec/century for T).
+# Multiply T coefficient by T/10 during evaluation.
+# arg = l*Mp + l'*M + F*F + D*D + Ω*Ω  (radians)
+_NUT_TABLE = (
+    # l   l'   F   D   Ω    ψ_sin    ψ_T×10   ε_cos   ε_T×10
+    ( 0,   0,   0,  0,  1, -171996,   -1742,   92025,     89),
+    (-2,   0,   0,  2,  2,  -13187,     -16,    5736,    -31),
+    ( 0,   0,   0,  2,  2,   -2274,      -2,     977,     -5),
+    ( 0,   0,   0,  0,  2,    2062,       2,    -895,      5),
+    ( 0,   1,   0,  0,  0,    1426,     -34,      54,     -1),
+    ( 0,   0,   1,  0,  0,     712,       1,      -7,      0),
+    (-2,   1,   0,  2,  2,    -517,      12,     224,     -6),
+    ( 0,   0,   0,  2,  1,    -386,      -4,     200,      0),
+    ( 0,   0,   1,  2,  2,    -301,       0,     129,     -1),
+    (-2,  -1,   0,  2,  2,     217,      -5,     -95,      3),
+    (-2,   0,   1,  0,  0,    -158,       0,       0,      0),
+    (-2,   0,   0,  2,  1,     129,       1,     -70,      0),
+    ( 0,   0,  -1,  2,  2,     123,       0,     -53,      0),
+    ( 2,   0,   0,  0,  0,      63,       0,       0,      0),
+    ( 0,   0,   1,  0,  1,      63,       1,     -33,      0),
+    ( 2,   0,  -1,  2,  2,     -59,       0,      26,      0),
+    ( 0,   0,  -1,  0,  1,     -58,      -1,      32,      0),
+    ( 0,   0,   1,  2,  1,     -51,       0,      27,      0),
+    (-2,   0,   2,  0,  0,      48,       0,       0,      0),
+    ( 0,   0,  -2,  2,  1,      46,       0,     -24,      0),
+    ( 2,   0,   0,  2,  2,     -38,       0,      16,      0),
+    ( 0,   0,   2,  2,  2,     -31,       0,      13,      0),
+    ( 0,   0,   2,  0,  0,      29,       0,       0,      0),
+    (-2,   0,   1,  2,  2,      29,       0,     -12,      0),
+    ( 0,   0,   0,  2,  0,      26,       0,       0,      0),
+    (-2,   0,   0,  2,  0,     -22,       0,       0,      0),
+    ( 0,   0,  -1,  2,  1,      21,       0,     -10,      0),
+    ( 0,   2,   0,  0,  0,      17,      -1,       0,      0),
+    ( 2,   0,  -1,  0,  1,      16,       0,      -8,      0),
+    (-2,   2,   0,  2,  2,     -16,       1,       7,      0),
+    ( 0,   1,   0,  0,  1,     -15,       0,       9,      0),
+    (-2,   0,   1,  0,  1,     -13,       0,       7,      0),
+    ( 0,  -1,   0,  0,  1,     -12,       0,       6,      0),
+    ( 0,   0,   2, -2,  0,      11,       0,       0,      0),
+    ( 2,   0,  -1,  2,  1,     -10,       0,       5,      0),
+    ( 2,   0,   1,  2,  2,      -8,       0,       3,      0),
+    ( 0,   1,   0,  2,  2,      -7,       0,       3,      0),
+    (-2,   1,   1,  0,  0,      -7,       0,       0,      0),
+    ( 0,  -1,   0,  2,  2,      -7,       0,       3,      0),
+    ( 2,   0,   0,  2,  1,      -6,       0,       3,      0),
+    ( 2,   0,   1,  0,  0,      -6,       0,       0,      0),
+    (-2,   0,   2,  2,  2,       5,       0,      -3,      0),
+    (-2,   0,   1,  2,  1,       5,       0,      -3,      0),
+    ( 2,   0,  -2,  0,  1,      -5,       0,       3,      0),
+    ( 2,   0,   0,  0,  1,      -5,       0,       3,      0),
+    ( 0,  -1,   1,  0,  0,      -5,       0,       0,      0),
+    (-2,  -1,   0,  2,  1,      -5,       0,       3,      0),
+    (-2,   0,   0,  0,  1,      -5,       0,       3,      0),
+    ( 0,   0,   2,  2,  1,      -5,       0,       3,      0),
+    (-2,   0,   2,  0,  1,       4,       0,       0,      0),
+    (-2,   1,   0,  2,  1,       4,       0,      -2,      0),
+    ( 0,   0,   1, -2,  0,       4,       0,       0,      0),
+    (-1,   0,   1,  0,  0,      -4,       0,       0,      0),
+    (-2,   1,   0,  0,  0,      -4,       0,       0,      0),
+    ( 1,   0,   0,  0,  0,      -4,       0,       0,      0),
+    ( 0,   0,   1,  2,  0,       3,       0,       0,      0),
+    ( 0,   0,  -2,  2,  2,      -3,       0,       1,      0),
+    (-1,  -1,   1,  0,  0,      -3,       0,       0,      0),
+    ( 0,   1,   1,  0,  0,      -3,       0,       0,      0),
+    ( 0,  -1,   1,  2,  2,      -3,       0,       1,      0),
+    ( 2,  -1,  -1,  2,  2,      -3,       0,       1,      0),
+    ( 0,   0,   3,  2,  2,      -3,       0,       1,      0),
+    ( 2,  -1,   0,  2,  2,      -3,       0,       1,      0),
+)
+
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
 def _rz(a: float) -> np.ndarray:
@@ -205,6 +279,31 @@ def _precess_to_j2000(r_date: np.ndarray, T: float) -> np.ndarray:
     # P^T rotates of-date → J2000
     P = _rz(-z_A) @ _ry(theta_A) @ _rz(-zeta_A)
     return P.T @ r_date
+
+
+def _nutation(
+    T: float,
+    Mp_r: float,
+    M_r: float,
+    F_r: float,
+    D_r: float,
+) -> tuple[float, float]:
+    """IAU 1980 nutation: returns (Δψ, Δε) in radians (Meeus Ch. 22)."""
+    Om = (125.04452
+          - 1934.136261 * T
+          + 0.0020708   * T**2
+          + T**3        / 450000.0)
+    Om_r = math.radians(Om % 360.0)
+
+    dpsi = deps = 0.0
+    for l_c, lp_c, F_c, D_c, Om_c, psi_s, psi_T, eps_c, eps_T in _NUT_TABLE:
+        arg = l_c * Mp_r + lp_c * M_r + F_c * F_r + D_c * D_r + Om_c * Om_r
+        dpsi += (psi_s + psi_T * T / 10.0) * math.sin(arg)
+        deps += (eps_c + eps_T * T / 10.0) * math.cos(arg)
+
+    # 0.0001 arcsec → radians
+    as2r = math.pi / (180.0 * 3600.0)
+    return dpsi * 1e-4 * as2r, deps * 1e-4 * as2r
 
 
 def _moon_pos_eci_jd(jd: float) -> np.ndarray:
@@ -250,6 +349,8 @@ def _moon_pos_eci_jd(jd: float) -> np.ndarray:
     D_r, M_r, Mp_r, F_r = _r(D), _r(M), _r(Mp), _r(F)
     Lp_r, A1_r, A2_r, A3_r = _r(Lp), _r(A1), _r(A2), _r(A3)
 
+    dpsi, deps = _nutation(T, Mp_r, M_r, F_r, D_r)
+
     # ── Σl and Σr ─────────────────────────────────────────────────────────────
     Sl = Sr = 0.0
     for D_c, M_c, Mp_c, F_c, sl, sr in _TABLE_LR:
@@ -277,17 +378,18 @@ def _moon_pos_eci_jd(jd: float) -> np.ndarray:
            -  115.0 * math.sin(Lp_r + Mp_r))
 
     # ── Ecliptic longitude, latitude, distance ────────────────────────────────
-    lam  = math.radians((Lp + Sl / 1e6) % 360.0)
+    # dpsi converts mean → apparent (true) ecliptic longitude
+    lam  = math.radians((Lp + Sl / 1e6) % 360.0) + dpsi
     beta = math.radians(Sb / 1e6)
     dist = 385000.56 + Sr / 1e3      # km
 
-    # ── Mean obliquity of the ecliptic (IAU formula) ──────────────────────────
+    # ── True obliquity of the ecliptic (mean + nutation in obliquity) ─────────
     eps = math.radians(
         23.439291111
         - 0.013004167 * T
         - 1.638889e-7 * T**2
         + 5.036111e-7 * T**3
-    )
+    ) + deps
 
     # ── Ecliptic → mean equatorial of date ────────────────────────────────────
     cos_b, sin_b = math.cos(beta), math.sin(beta)

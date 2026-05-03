@@ -73,6 +73,9 @@ if "%NO_GUI%"=="0" (
 echo Installing validation dependencies (sgp4, astropy) ...
 pip install sgp4 astropy --quiet
 
+echo Installing ephemeris dependencies (jplephem) ...
+pip install jplephem --quiet
+
 echo Installing viz dependencies (plotly) ...
 pip install plotly --quiet
 echo.

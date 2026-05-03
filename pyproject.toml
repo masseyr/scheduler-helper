@@ -12,6 +12,7 @@ dependencies = ["numpy"]
 [project.optional-dependencies]
 dev = ["pytest", "pytest-cov"]
 validation = ["sgp4", "astropy"]
+ephemeris = ["jplephem"]
 viz = ["plotly"]
 gui = ["PySide6", "matplotlib"]
 
