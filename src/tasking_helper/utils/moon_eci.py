@@ -390,6 +390,7 @@ def _moon_pos_eci_jd(jd: float) -> np.ndarray:
         - 1.638889e-7 * T**2
         + 5.036111e-7 * T**3
     ) + deps
+    
 
     # ── Ecliptic → mean equatorial of date ────────────────────────────────────
     cos_b, sin_b = math.cos(beta), math.sin(beta)
@@ -403,7 +404,9 @@ def _moon_pos_eci_jd(jd: float) -> np.ndarray:
     r_date = np.array([x, y, z])
 
     # ── Precess to J2000.0 ────────────────────────────────────────────────────
-    return _precess_to_j2000(r_date, T)
+    _pr = _precess_to_j2000(r_date, T)
+    print(round(jd,5), eps, _pr)
+    return _pr
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
