@@ -29,6 +29,19 @@ from .sun_eci import (
     sun_pos_ecr,
     sun_state_ecr,
 )
+from .keplerian import (
+    lla_to_ecr,
+    ecr_to_lla,
+    lla_to_eci,
+    eci_to_lla,
+    eci_to_ecr as eci_to_ecr_km,
+    ecr_to_eci,
+    state_to_keplerian,
+    keplerian_to_state,
+    solve_kepler,
+    keplerian_to_lla,
+    lla_to_keplerian,
+)
 
 __all__ = [
     "J2000",
@@ -56,4 +69,15 @@ __all__ = [
     "sun_state_eci",
     "sun_pos_ecr",
     "sun_state_ecr",
+    "lla_to_ecr",
+    "ecr_to_lla",
+    "lla_to_eci",
+    "eci_to_lla",
+    "eci_to_ecr_km",
+    "ecr_to_eci",
+    "state_to_keplerian",
+    "keplerian_to_state",
+    "solve_kepler",
+    "keplerian_to_lla",
+    "lla_to_keplerian",
 ]
