@@ -53,6 +53,7 @@ from .keplerian import (
     lla_to_keplerian,
 )
 from .coverage import (
+    EphemerisInterpolator,
     GroundSensor,
     AccessInterval,
     compute_access,
@@ -104,6 +105,7 @@ __all__ = [
     "solve_kepler",
     "keplerian_to_lla",
     "lla_to_keplerian",
+    "EphemerisInterpolator",
     "GroundSensor",
     "AccessInterval",
     "compute_access",
