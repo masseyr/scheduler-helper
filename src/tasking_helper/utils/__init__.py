@@ -1,4 +1,4 @@
-"""tasking_helper.utils — Julian Date, TLE, and coordinate utilities."""
+"""tasking_helper.utils -- Julian Date, TLE, and coordinate utilities."""
 
 from .jdate import (
     J2000,
@@ -29,6 +29,16 @@ from .sun_eci import (
     sun_pos_ecr,
     sun_state_ecr,
 )
+from .lwir import (
+    planck_spectral_radiance,
+    in_band_radiance,
+    solid_angle_sphere,
+    compute_irradiance,
+    LWIRSensor,
+    DetectionResult,
+    LWIR_8_12,
+    LWIR_8_14,
+)
 from .keplerian import (
     lla_to_ecr,
     ecr_to_lla,
@@ -41,6 +51,12 @@ from .keplerian import (
     solve_kepler,
     keplerian_to_lla,
     lla_to_keplerian,
+)
+from .coverage import (
+    GroundSensor,
+    AccessInterval,
+    compute_access,
+    compute_access_table,
 )
 
 __all__ = [
@@ -69,6 +85,14 @@ __all__ = [
     "sun_state_eci",
     "sun_pos_ecr",
     "sun_state_ecr",
+    "planck_spectral_radiance",
+    "in_band_radiance",
+    "solid_angle_sphere",
+    "compute_irradiance",
+    "LWIRSensor",
+    "DetectionResult",
+    "LWIR_8_12",
+    "LWIR_8_14",
     "lla_to_ecr",
     "ecr_to_lla",
     "lla_to_eci",
@@ -80,4 +104,8 @@ __all__ = [
     "solve_kepler",
     "keplerian_to_lla",
     "lla_to_keplerian",
+    "GroundSensor",
+    "AccessInterval",
+    "compute_access",
+    "compute_access_table",
 ]

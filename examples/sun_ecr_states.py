@@ -1,18 +1,18 @@
 """
-Sun ECR state vectors — JPL DE432s vs VSOP87 comparison.
+Sun ECR state vectors -- JPL DE432s vs VSOP87 comparison.
 
 Run with:
     python examples/sun_ecr_states.py
 
 Prints three tables for each epoch:
-  1. JPL    — position/velocity from sun_jpl.py  (DE432s kernel, high accuracy)
-  2. VSOP87 — position/velocity from sun_eci.py  (truncated VSOP87, ~2–4 arcsec)
-  3. Diff   — |pos_jpl - pos_vsop| and |vel_jpl - vel_vsop|
+  1. JPL    -- position/velocity from sun_jpl.py  (DE432s kernel, high accuracy)
+  2. VSOP87 -- position/velocity from sun_eci.py  (truncated VSOP87, ~2-4 arcsec)
+  3. Diff   -- |pos_jpl - pos_vsop| and |vel_jpl - vel_vsop|
 
 Uses the same epochs as moon_ecr_states.py.
 de432s.bsp covers 1949-12-14 to 2050-01-02; keep all epochs within this range.
 
-Note on ECR velocity: at ~1 AU, ω_E × r dominates (~10 900 km/s), so |v_ecr|
+Note on ECR velocity: at ~1 AU, omega_E x r dominates (~10 900 km/s), so |v_ecr|
 reflects Earth's daily rotation sweeping the Sun. |v_eci| (~30 km/s) is the
 physically meaningful orbital speed.
 """
@@ -27,7 +27,7 @@ from tasking_helper.utils.sun_jpl import setup
 from tasking_helper.utils.sun_eci import sun_state_eci as vsop_state_eci
 from tasking_helper.utils.sun_eci import sun_state_ecr as vsop_state_ecr
 
-# ── Epochs (same as moon_ecr_states.py) ──────────────────────────────────────
+# -- Epochs (same as moon_ecr_states.py) --------------------------------------
 
 TIMES = [
     datetime(2025, 1,  1, 0, 0, 0, tzinfo=timezone.utc),
@@ -66,7 +66,7 @@ TIMES = [
 
 _AU = 149_597_870.7
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# -- Helpers -------------------------------------------------------------------
 
 _WE = 26   # epoch column width
 _WP = 16   # position component width
@@ -122,7 +122,7 @@ def _print_table(title: str, hdr: str, rows: list[str]) -> None:
     print()
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# -- Main ----------------------------------------------------------------------
 
 def main() -> None:
     bsp = setup()

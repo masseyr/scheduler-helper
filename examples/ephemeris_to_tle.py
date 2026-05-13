@@ -1,5 +1,5 @@
 """
-ephemeris_to_tle.py — Fit TLE(s) to an ECI state-vector ephemeris.
+ephemeris_to_tle.py -- Fit TLE(s) to an ECI state-vector ephemeris.
 
 Input CSV columns (header row optional, auto-skipped):
     time_utc, x_km, y_km, z_km, vx_kms, vy_kms, vz_kms
@@ -11,7 +11,7 @@ Input CSV columns (header row optional, auto-skipped):
 
 Algorithm
 ---------
-1. Compute osculating Keplerian elements at arc midpoint → initial TLE guess.
+1. Compute osculating Keplerian elements at arc midpoint -> initial TLE guess.
 2. Propagate candidate TLE with SGP4 and minimise RMS position residual
    (Nelder-Mead, scipy).  Subsample to ~one point per --subsample seconds
    for speed; evaluate final statistics on the full arc.
@@ -21,7 +21,7 @@ Algorithm
 Frame note
 ----------
 SGP4 propagates in TEME; ECI J2000 and TEME differ by < 1 km for most
-epochs — acceptable at TLE accuracy.  For sub-km fidelity, transform
+epochs -- acceptable at TLE accuracy.  For sub-km fidelity, transform
 your ephemeris to TEME before fitting.
 
 Dependencies
@@ -63,13 +63,13 @@ try:
 except ImportError as exc:
     raise SystemExit("sgp4 is required:  pip install sgp4") from exc
 
-# ── Constants ─────────────────────────────────────────────────────────────────
+# -- Constants -----------------------------------------------------------------
 
-MU          = 398_600.4418      # km³ s⁻²
+MU          = 398_600.4418      # km^3 s^-2
 TWO_PI      = 2.0 * math.pi
 _SGP4_EPOCH = 2_433_281.5       # JD of 1949 Dec 31 00:00 UT
 
-# ── TLE formatting ─────────────────────────────────────────────────────────────
+# -- TLE formatting -------------------------------------------------------------
 
 def _tle_checksum(line: str) -> int:
     return sum(int(c) if c.isdigit() else (1 if c == "-" else 0)
@@ -77,12 +77,12 @@ def _tle_checksum(line: str) -> int:
 
 
 def _tle_exp_float(value: float) -> str:
-    """Format as ±NNNNN±N  (8 chars) — used for B* and nddot fields."""
+    """Format as +/-NNNNN+/-N  (8 chars) -- used for B* and nddot fields."""
     if abs(value) < 1e-30:
         return " 00000-0"
     sign = " " if value >= 0 else "-"
     av   = abs(value)
-    exp  = math.floor(math.log10(av)) + 1   # mantissa ∈ [0.1, 1.0)
+    exp  = math.floor(math.log10(av)) + 1   # mantissa in [0.1, 1.0)
     if abs(exp) > 9:                         # out of representable range
         return " 00000-0"
     m    = min(round(av * 10 ** (5 - exp)), 99_999)
@@ -91,7 +91,7 @@ def _tle_exp_float(value: float) -> str:
 
 
 def _tle_ndot(ndot_rev_day2: float) -> str:
-    """Format ndot as ±.NNNNNNNN  (10 chars)."""
+    """Format ndot as +/-.NNNNNNNN  (10 chars)."""
     sign = " " if ndot_rev_day2 >= 0 else "-"
     m    = min(round(abs(ndot_rev_day2) * 1e8), 99_999_999)
     return f"{sign}.{m:08d}"
@@ -140,7 +140,7 @@ def format_tle(name: str, elems: dict,
     return f"{name}\n{l1}\n{l2}"
 
 
-# ── State vector ↔ Keplerian elements ────────────────────────────────────────
+# -- State vector <-> Keplerian elements ----------------------------------------
 
 def state_to_keplerian(pos_km: np.ndarray, vel_kms: np.ndarray):
     """
@@ -191,7 +191,7 @@ def state_to_keplerian(pos_km: np.ndarray, vel_kms: np.ndarray):
     return a, ecc, incl, raan, argp, M
 
 
-# ── SGP4 helpers ──────────────────────────────────────────────────────────────
+# -- SGP4 helpers --------------------------------------------------------------
 
 def _make_satrec(a_km: float, ecc: float, incl: float, raan: float,
                  argp: float, M: float, epoch_jd: float, bstar: float = 0.0) -> Satrec:
@@ -220,7 +220,7 @@ def _propagate(sat: Satrec, jd: np.ndarray) -> np.ndarray:
         return pos
 
 
-# ── TLE fitting ───────────────────────────────────────────────────────────────
+# -- TLE fitting ---------------------------------------------------------------
 
 # Typical magnitudes used to scale optimizer parameters to O(1)
 _SCALES = np.array([7_000.0, 0.01, 1.0, 1.0, 1.0, 1.0, 1e-4])
@@ -336,7 +336,7 @@ def fit_tles_recursive(
     t0 = jd_to_datetime(jd_times[0]).strftime("%H:%M:%S")
     t1 = jd_to_datetime(jd_times[-1]).strftime("%H:%M:%S")
     print(f"{indent}[depth {depth}] {t0}-{t1}  max {maxr:.1f} km "
-          f"> {threshold_km:.1f} km → splitting", file=sys.stderr)
+          f"> {threshold_km:.1f} km -> splitting", file=sys.stderr)
 
     mid   = len(jd_times) // 2
     left  = fit_tles_recursive(jd_times[:mid], pos_eci[:mid], vel_eci[:mid],
@@ -346,7 +346,7 @@ def fit_tles_recursive(
     return left + right
 
 
-# ── CSV reader ─────────────────────────────────────────────────────────────────
+# -- CSV reader -----------------------------------------------------------------
 
 def _parse_time(s: str) -> datetime:
     s = s.strip().strip('"')
@@ -386,7 +386,7 @@ def read_ephemeris(path: str | Path) -> tuple[np.ndarray, np.ndarray, np.ndarray
             if len(parts) < 7:
                 continue
             try:
-                float(parts[1])          # numeric check — skip header
+                float(parts[1])          # numeric check -- skip header
             except ValueError:
                 continue
             try:
@@ -407,7 +407,7 @@ def read_ephemeris(path: str | Path) -> tuple[np.ndarray, np.ndarray, np.ndarray
     return jd, pos, vel
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# -- Main ----------------------------------------------------------------------
 
 def main() -> None:
     ap = argparse.ArgumentParser(
@@ -428,8 +428,8 @@ def main() -> None:
                     help="Write output to file (default: stdout)")
     args = ap.parse_args()
 
-    # ── Load data ──────────────────────────────────────────────────────────────
-    print(f"Reading {args.csv} …", file=sys.stderr)
+    # -- Load data --------------------------------------------------------------
+    print(f"Reading {args.csv} ...", file=sys.stderr)
     jd_times, pos_eci, vel_eci = read_ephemeris(args.csv)
     N     = len(jd_times)
     arc_m = (jd_times[-1] - jd_times[0]) * 1440.0
@@ -441,9 +441,9 @@ def main() -> None:
     cadence_s = max(1.0, (jd_times[-1] - jd_times[0]) * 86_400.0 / max(1, N - 1))
     min_pts   = max(60, round(args.min_arc * 60.0 / cadence_s))
 
-    # ── Fit ────────────────────────────────────────────────────────────────────
+    # -- Fit --------------------------------------------------------------------
     print(f"Fitting: threshold={args.threshold} km, "
-          f"min_arc={args.min_arc} min, subsample={args.subsample} s …",
+          f"min_arc={args.min_arc} min, subsample={args.subsample} s ...",
           file=sys.stderr)
 
     results = fit_tles_recursive(
@@ -453,7 +453,7 @@ def main() -> None:
         subsample_s=args.subsample,
     )
 
-    # ── Build output ───────────────────────────────────────────────────────────
+    # -- Build output -----------------------------------------------------------
     lines: list[str] = []
     lines.append(f"# Ephemeris-to-TLE fit: {Path(args.csv).name}")
     lines.append(f"# Source  : {N} points, {arc_m:.1f} min arc")
@@ -479,7 +479,7 @@ def main() -> None:
     else:
         print(output)
 
-    # ── Summary table ──────────────────────────────────────────────────────────
+    # -- Summary table ----------------------------------------------------------
     hdr = f"  {'#':>3}  {'Epoch (UTC)':>19}  {'Arc [min]':>9}  {'RMS [km]':>8}  {'Max [km]':>8}"
     sep = "  " + "-" * (len(hdr) - 2)
     print(f"\nFit summary ({len(results)} segment(s)):", file=sys.stderr)

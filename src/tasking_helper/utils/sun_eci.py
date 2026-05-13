@@ -1,16 +1,16 @@
 """
-sun_eci — Geocentric Sun ECI/ECR state vectors via VSOP87 (truncated).
+sun_eci -- Geocentric Sun ECI/ECR state vectors via VSOP87 (truncated).
 
 Implements Meeus "Astronomical Algorithms" 2nd ed., Chapter 33 (VSOP87 theory
 for Earth's heliocentric coordinates), plus IAU 1976 precession to J2000.0.
 
 The Earth's heliocentric position (L, B, R) is computed from the VSOP87
 series; the geocentric Sun position is the opposite vector:
-    λ_sun = L + 180°,  β_sun = −B,  Δ = R
+    lam_sun = L + 180deg,  beta_sun = -B,  Delta = R
 
-Typical accuracy over 2025–2050 (vs JPL DE432s):
-  position  ≲ 1 000 km  (VSOP87 truncated, ~1 arcsec)
-  velocity  ≲ 0.001 m/s  (central finite-difference, dt = 60 s)
+Typical accuracy over 2025-2050 (vs JPL DE432s):
+  position  <~ 1 000 km  (VSOP87 truncated, ~1 arcsec)
+  velocity  <~ 0.001 m/s  (central finite-difference, dt = 60 s)
 
 For position accuracy < 10 km use sun_jpl.py (JPL DE kernel).
 
@@ -44,12 +44,12 @@ _J2000   = 2_451_545.0
 _AU_KM   = 149_597_870.7      # km per astronomical unit
 _OMEGA_E = 7.292115e-5         # Earth rotation rate [rad/s]
 
-# ── VSOP87 Earth heliocentric series (Meeus Table 33.A) ───────────────────────
+# -- VSOP87 Earth heliocentric series (Meeus Table 33.A) -----------------------
 # Each sub-table: rows of (A, B, C); contribution = A * cos(B + C * tau)
-# tau = (JDE − J2000) / 365250  [Julian Ephemeris Millennia from J2000.0]
-# L [rad] = (Σ Ln * tau^n) / 1e8
-# B [rad] = (Σ Bn * tau^n) / 1e8
-# R [AU]  = (Σ Rn * tau^n) / 1e8
+# tau = (JDE - J2000) / 365250  [Julian Ephemeris Millennia from J2000.0]
+# L [rad] = (Sigma Ln * tau^n) / 1e8
+# B [rad] = (Sigma Bn * tau^n) / 1e8
+# R [AU]  = (Sigma Rn * tau^n) / 1e8
 
 _L0 = (
     (175347046, 0,         0           ),
@@ -247,7 +247,7 @@ _R4 = (
 )
 
 
-# ── Internal helpers ──────────────────────────────────────────────────────────
+# -- Internal helpers ----------------------------------------------------------
 
 def _vsop_sum(terms: tuple, tau: float) -> float:
     return sum(A * math.cos(B + C * tau) for A, B, C in terms)
@@ -282,7 +282,7 @@ def _sun_pos_eci_jd(jd: float) -> np.ndarray:
     tau = (jd - _J2000) / 365250.0   # Julian Ephemeris Millennia
     T   = tau * 10.0                  # Julian Centuries
 
-    # ── Earth heliocentric longitude L [rad] ──────────────────────────────────
+    # -- Earth heliocentric longitude L [rad] ----------------------------------
     L0 = _vsop_sum(_L0, tau)
     L1 = _vsop_sum(_L1, tau)
     L2 = _vsop_sum(_L2, tau)
@@ -292,12 +292,12 @@ def _sun_pos_eci_jd(jd: float) -> np.ndarray:
     L = (L0 + L1*tau + L2*tau**2 + L3*tau**3 + L4*tau**4 + L5*tau**5) / 1e8
     L = L % (2.0 * math.pi)
 
-    # ── Earth heliocentric latitude B [rad] ───────────────────────────────────
+    # -- Earth heliocentric latitude B [rad] -----------------------------------
     B0 = _vsop_sum(_B0, tau)
     B1 = _vsop_sum(_B1, tau)
     B = (B0 + B1*tau) / 1e8
 
-    # ── Earth-Sun distance R [AU] ─────────────────────────────────────────────
+    # -- Earth-Sun distance R [AU] ---------------------------------------------
     R0 = _vsop_sum(_R0, tau)
     R1 = _vsop_sum(_R1, tau)
     R2 = _vsop_sum(_R2, tau)
@@ -305,12 +305,12 @@ def _sun_pos_eci_jd(jd: float) -> np.ndarray:
     R4 = _vsop_sum(_R4, tau)
     R = (R0 + R1*tau + R2*tau**2 + R3*tau**3 + R4*tau**4) / 1e8  # AU
 
-    # ── Geocentric Sun: flip direction, negate latitude ───────────────────────
+    # -- Geocentric Sun: flip direction, negate latitude -----------------------
     lam = (L + math.pi) % (2.0 * math.pi)   # geocentric ecliptic longitude
     beta = -B                                 # geocentric ecliptic latitude
     R_km = R * _AU_KM
 
-    # ── Mean obliquity of the ecliptic ────────────────────────────────────────
+    # -- Mean obliquity of the ecliptic ----------------------------------------
     eps = math.radians(
         23.439291111
         - 0.013004167 * T
@@ -318,7 +318,7 @@ def _sun_pos_eci_jd(jd: float) -> np.ndarray:
         + 5.036111e-7 * T**3
     )
 
-    # ── Ecliptic → mean equatorial of date ────────────────────────────────────
+    # -- Ecliptic -> mean equatorial of date ------------------------------------
     cos_b, sin_b = math.cos(beta), math.sin(beta)
     cos_l, sin_l = math.cos(lam),  math.sin(lam)
     cos_e, sin_e = math.cos(eps),  math.sin(eps)
@@ -327,7 +327,7 @@ def _sun_pos_eci_jd(jd: float) -> np.ndarray:
     y = R_km * (cos_b * sin_l * cos_e - sin_b * sin_e)
     z = R_km * (cos_b * sin_l * sin_e + sin_b * cos_e)
 
-    # ── Precess to J2000.0 ────────────────────────────────────────────────────
+    # -- Precess to J2000.0 ----------------------------------------------------
     return _precess_to_j2000(np.array([x, y, z]), T)
 
 
@@ -342,7 +342,7 @@ def _gmst_rad(jd: float) -> float:
     return math.radians(theta % 360.0)
 
 
-# ── Public API ────────────────────────────────────────────────────────────────
+# -- Public API ----------------------------------------------------------------
 
 def sun_pos_eci(t: datetime) -> np.ndarray:
     """
@@ -368,7 +368,7 @@ def sun_state_eci(
     """
     Sun position [km] and velocity [km/s] in ECI J2000.0 for UTC datetime *t*.
 
-    Velocity is estimated by a centred finite difference of width 2·*dt_s*.
+    Velocity is estimated by a centred finite difference of width 2**dt_s*.
 
     Parameters
     ----------
@@ -415,9 +415,9 @@ def sun_state_ecr(
     Sun position [km] and velocity [km/s] in ECR (ECEF) for UTC datetime *t*.
 
     ECR velocity accounts for Earth's rotation:
-        v_ecr = R(θ)·v_eci − ω_E × r_ecr
+        v_ecr = R(theta)*v_eci - omega_E x r_ecr
 
-    Note: |v_ecr| ≈ 10 900 km/s at 1 AU (Earth's daily rotation dominates).
+    Note: |v_ecr| ~= 10 900 km/s at 1 AU (Earth's daily rotation dominates).
 
     Returns
     -------

@@ -1,20 +1,20 @@
 """
-keplerian.py — Conversions between geodetic (lat/lon/alt), ECI/ECR Cartesian,
+keplerian.py -- Conversions between geodetic (lat/lon/alt), ECI/ECR Cartesian,
                and Keplerian orbital elements.
 
 Coordinate frames
 -----------------
 LLA   Geodetic:  latitude [deg], longitude [deg], altitude [km]
       Uses the WGS-84 ellipsoid.
-ECR   Earth-Centred Rotating (≡ ECEF): x, y, z [km]
-ECI   Earth-Centred Inertial (GCRS ≈ J2000): x, y, z [km]
+ECR   Earth-Centred Rotating (== ECEF): x, y, z [km]
+ECI   Earth-Centred Inertial (GCRS ~= J2000): x, y, z [km]
 
-Frame rotation ECI ↔ ECR uses GMST (no EOP corrections; < 0.1 km error for LEO).
+Frame rotation ECI <-> ECR uses GMST (no EOP corrections; < 0.1 km error for LEO).
 
 Keplerian elements
 ------------------
 a_km     semi-major axis                    [km]
-ecc      eccentricity                       (0 = circular, 0 ≤ ecc < 1)
+ecc      eccentricity                       (0 = circular, 0 <= ecc < 1)
 incl_deg inclination                        [deg]
 raan_deg right ascension of ascending node  [deg]
 argp_deg argument of perigee               [deg]
@@ -26,24 +26,24 @@ Distances are always in km; velocities in km/s.
 
 Public API
 ----------
-Geodetic ↔ Cartesian:
-    lla_to_ecr(lat, lon, alt)                   → ndarray (3,) [km]
-    ecr_to_lla(r_ecr)                           → (lat°, lon°, alt km)
-    lla_to_eci(lat, lon, alt, t)                → ndarray (3,) [km]
-    eci_to_lla(r_eci, t)                        → (lat°, lon°, alt km)
-    eci_to_ecr(r_eci, t)                        → ndarray (3,) [km]
-    ecr_to_eci(r_ecr, t)                        → ndarray (3,) [km]
+Geodetic <-> Cartesian:
+    lla_to_ecr(lat, lon, alt)                   -> ndarray (3,) [km]
+    ecr_to_lla(r_ecr)                           -> (latdeg, londeg, alt km)
+    lla_to_eci(lat, lon, alt, t)                -> ndarray (3,) [km]
+    eci_to_lla(r_eci, t)                        -> (latdeg, londeg, alt km)
+    eci_to_ecr(r_eci, t)                        -> ndarray (3,) [km]
+    ecr_to_eci(r_ecr, t)                        -> ndarray (3,) [km]
 
 Orbital mechanics:
-    state_to_keplerian(pos_km, vel_kms)         → dict
+    state_to_keplerian(pos_km, vel_kms)         -> dict
     keplerian_to_state(a_km, ecc, incl_deg,
-                       raan_deg, argp_deg, M_deg) → (pos [km], vel [km/s])
+                       raan_deg, argp_deg, M_deg) -> (pos [km], vel [km/s])
 
 Pipelines:
     keplerian_to_lla(a_km, ecc, incl_deg,
-                     raan_deg, argp_deg, M_deg, t) → (lat°, lon°, alt km)
+                     raan_deg, argp_deg, M_deg, t) -> (latdeg, londeg, alt km)
     lla_to_keplerian(lat, lon, alt,
-                     vel_eci_kms, t)              → dict
+                     vel_eci_kms, t)              -> dict
 
 Notes
 -----
@@ -51,7 +51,7 @@ Notes
   therefore requires the ECI velocity vector as a separate argument.
 * For near-circular orbits (ecc < 1e-4) argp_deg and M_deg become individually
   ill-defined; the returned sum (nu_deg + argp_deg = argument of latitude) remains
-  meaningful.  For near-equatorial orbits (incl < 0.01°) raan_deg is similarly
+  meaningful.  For near-equatorial orbits (incl < 0.01deg) raan_deg is similarly
   arbitrary.  The round-trip keplerian_to_state(state_to_keplerian(r, v)) is
   exact regardless of orbit type.
 """
@@ -75,7 +75,7 @@ from .utils import (
 )
 
 __all__ = [
-    # Geodetic ↔ Cartesian
+    # Geodetic <-> Cartesian
     "lla_to_ecr",
     "ecr_to_lla",
     "lla_to_eci",
@@ -91,16 +91,16 @@ __all__ = [
     "lla_to_keplerian",
 ]
 
-# ── Constants ─────────────────────────────────────────────────────────────────
+# -- Constants -----------------------------------------------------------------
 
-MU     = 398_600.4418   # Earth gravitational parameter [km³ s⁻²]
+MU     = 398_600.4418   # Earth gravitational parameter [km^3 s^-2]
 TWO_PI = 2.0 * math.pi
 
 
-# ── Internal helpers ──────────────────────────────────────────────────────────
+# -- Internal helpers ----------------------------------------------------------
 
 def _jd(t: datetime) -> float:
-    """UTC datetime → Julian Date."""
+    """UTC datetime -> Julian Date."""
     if t.tzinfo is None:
         t = t.replace(tzinfo=timezone.utc)
     return datetime_to_jd(t)
@@ -110,16 +110,16 @@ def _deg(x: float) -> float:
     return math.degrees(x) % 360.0
 
 
-# ── Geodetic ↔ Cartesian ──────────────────────────────────────────────────────
+# -- Geodetic <-> Cartesian ------------------------------------------------------
 
 def lla_to_ecr(lat_deg: float, lon_deg: float, alt_km: float) -> np.ndarray:
     """
-    Geodetic LLA → ECR position [km].
+    Geodetic LLA -> ECR position [km].
 
     Parameters
     ----------
-    lat_deg : geodetic latitude  [deg]  −90 … +90
-    lon_deg : longitude          [deg]  −180 … +360
+    lat_deg : geodetic latitude  [deg]  -90 ... +90
+    lon_deg : longitude          [deg]  -180 ... +360
     alt_km  : altitude above WGS-84 ellipsoid [km]
 
     Returns
@@ -128,16 +128,16 @@ def lla_to_ecr(lat_deg: float, lon_deg: float, alt_km: float) -> np.ndarray:
     """
     lat = math.radians(lat_deg)
     lon = math.radians(lon_deg)
-    return _lla_to_ecef_m(lat, lon, alt_km * 1e3) / 1e3   # m → km
+    return _lla_to_ecef_m(lat, lon, alt_km * 1e3) / 1e3   # m -> km
 
 
 def ecr_to_lla(r_ecr: np.ndarray) -> tuple[float, float, float]:
     """
-    ECR position [km] → geodetic (lat°, lon°, alt km).
+    ECR position [km] -> geodetic (latdeg, londeg, alt km).
 
-    Uses Bowring's iterative method (5 iterations — accurate to < 0.1 mm).
+    Uses Bowring's iterative method (5 iterations -- accurate to < 0.1 mm).
     """
-    lla = _ecef_to_lla(np.asarray(r_ecr) * 1e3)           # km → m
+    lla = _ecef_to_lla(np.asarray(r_ecr) * 1e3)           # km -> m
     lat_deg = math.degrees(float(lla[0]))
     lon_deg = math.degrees(float(lla[1]))
     alt_km  = float(lla[2]) / 1e3
@@ -146,7 +146,7 @@ def ecr_to_lla(r_ecr: np.ndarray) -> tuple[float, float, float]:
 
 def eci_to_ecr(r_eci: np.ndarray, t: datetime) -> np.ndarray:
     """
-    ECI position [km] → ECR position [km] at epoch t (UTC).
+    ECI position [km] -> ECR position [km] at epoch t (UTC).
 
     Rotation by GMST (no polar motion correction).
     """
@@ -156,7 +156,7 @@ def eci_to_ecr(r_eci: np.ndarray, t: datetime) -> np.ndarray:
 
 def ecr_to_eci(r_ecr: np.ndarray, t: datetime) -> np.ndarray:
     """
-    ECR position [km] → ECI position [km] at epoch t (UTC).
+    ECR position [km] -> ECI position [km] at epoch t (UTC).
     """
     jd = _jd(t)
     return _ecef_to_eci_m(np.asarray(r_ecr) * 1e3, jd) / 1e3
@@ -165,7 +165,7 @@ def ecr_to_eci(r_ecr: np.ndarray, t: datetime) -> np.ndarray:
 def lla_to_eci(lat_deg: float, lon_deg: float, alt_km: float,
                t: datetime) -> np.ndarray:
     """
-    Geodetic LLA → ECI position [km] at epoch t (UTC).
+    Geodetic LLA -> ECI position [km] at epoch t (UTC).
 
     Useful for fixed ground points (e.g., a sensor site or target).
     """
@@ -175,7 +175,7 @@ def lla_to_eci(lat_deg: float, lon_deg: float, alt_km: float,
 
 def eci_to_lla(r_eci: np.ndarray, t: datetime) -> tuple[float, float, float]:
     """
-    ECI position [km] → geodetic (lat°, lon°, alt km) at epoch t (UTC).
+    ECI position [km] -> geodetic (latdeg, londeg, alt km) at epoch t (UTC).
 
     Useful for finding the subsatellite point and altitude of an orbiting body.
     """
@@ -183,17 +183,17 @@ def eci_to_lla(r_eci: np.ndarray, t: datetime) -> tuple[float, float, float]:
     return ecr_to_lla(r_ecr)
 
 
-# ── Kepler's equation ─────────────────────────────────────────────────────────
+# -- Kepler's equation ---------------------------------------------------------
 
 def solve_kepler(M_deg: float, ecc: float, tol: float = 1e-12) -> float:
     """
-    Solve Kepler's equation  M = E − e·sin(E)  for the eccentric anomaly E.
+    Solve Kepler's equation  M = E - e*sin(E)  for the eccentric anomaly E.
 
     Parameters
     ----------
     M_deg : mean anomaly [deg]
-    ecc   : eccentricity  (0 ≤ ecc < 1)
-    tol   : convergence tolerance on E [rad]  (default 1e-12 rad ≈ 0.2 µm at LEO)
+    ecc   : eccentricity  (0 <= ecc < 1)
+    tol   : convergence tolerance on E [rad]  (default 1e-12 rad ~= 0.2 um at LEO)
 
     Returns
     -------
@@ -202,15 +202,15 @@ def solve_kepler(M_deg: float, ecc: float, tol: float = 1e-12) -> float:
     Algorithm
     ---------
     Newton-Raphson with the Meeus starter
-        E₀ = M + e·sin(M)·(1 + e·cos(M))
-    Converges in < 10 iterations for ecc ≤ 0.95; uses a Halley step for
+        E_0 = M + e*sin(M)*(1 + e*cos(M))
+    Converges in < 10 iterations for ecc <= 0.95; uses a Halley step for
     ecc > 0.95 to ensure convergence at high eccentricity.
     """
     if not (0.0 <= ecc < 1.0):
-        raise ValueError(f"Eccentricity must satisfy 0 ≤ ecc < 1, got {ecc}")
+        raise ValueError(f"Eccentricity must satisfy 0 <= ecc < 1, got {ecc}")
     M = math.radians(M_deg) % TWO_PI
 
-    # Initial guess (Meeus, Astronomical Algorithms §30)
+    # Initial guess (Meeus, Astronomical Algorithms sec30)
     E = M + ecc * math.sin(M) * (1.0 + ecc * math.cos(M))
 
     for _ in range(50):
@@ -229,7 +229,7 @@ def solve_kepler(M_deg: float, ecc: float, tol: float = 1e-12) -> float:
     return math.degrees(E)
 
 
-# ── ECI state vector ↔ Keplerian elements ─────────────────────────────────────
+# -- ECI state vector <-> Keplerian elements -------------------------------------
 
 def state_to_keplerian(pos_km: np.ndarray,
                         vel_kms: np.ndarray) -> dict:
@@ -247,27 +247,27 @@ def state_to_keplerian(pos_km: np.ndarray,
         a_km     semi-major axis [km]
         ecc      eccentricity
         incl_deg inclination [deg]
-        raan_deg RAAN / Ω [deg]
-        argp_deg argument of perigee / ω [deg]
+        raan_deg RAAN / Omega [deg]
+        argp_deg argument of perigee / omega [deg]
         M_deg    mean anomaly [deg]
         nu_deg   true anomaly [deg]
         E_deg    eccentric anomaly [deg]
-        T_s      orbital period [s]  (= 2π√(a³/μ))
-        h_km2_s  specific angular momentum magnitude [km² s⁻¹]
+        T_s      orbital period [s]  (= 2pisqrt(a^3/mu))
+        h_km2_s  specific angular momentum magnitude [km^2 s^-1]
         r_km     current orbital radius [km]
 
     Notes
     -----
     Near-circular orbits (ecc < 1e-4):  argp_deg is set to 0; M_deg carries
-    the argument of latitude (ω + ν).
-    Near-equatorial orbits (incl < 0.01°):  raan_deg is set to 0.
+    the argument of latitude (omega + nu).
+    Near-equatorial orbits (incl < 0.01deg):  raan_deg is set to 0.
     """
     r_v  = np.asarray(pos_km,  dtype=float)
     v_v  = np.asarray(vel_kms, dtype=float)
     r    = float(np.linalg.norm(r_v))
     v    = float(np.linalg.norm(v_v))
 
-    h_v  = np.cross(r_v, v_v)             # specific angular momentum [km² s⁻¹]
+    h_v  = np.cross(r_v, v_v)             # specific angular momentum [km^2 s^-1]
     h    = float(np.linalg.norm(h_v))
     n_v  = np.cross([0.0, 0.0, 1.0], h_v) # ascending-node vector
     n    = float(np.linalg.norm(n_v))
@@ -301,7 +301,7 @@ def state_to_keplerian(pos_km: np.ndarray,
 
     # True anomaly
     if ecc < 1e-10:
-        # Near-circular: use argument of latitude u = ω + ν
+        # Near-circular: use argument of latitude u = omega + nu
         if n < 1e-10:
             nu = math.acos(max(-1.0, min(1.0, r_v[0] / r)))
             if r_v[1] < 0:
@@ -356,10 +356,10 @@ def keplerian_to_state(a_km:     float,
     Parameters
     ----------
     a_km     : semi-major axis [km]
-    ecc      : eccentricity  (0 ≤ ecc < 1)
+    ecc      : eccentricity  (0 <= ecc < 1)
     incl_deg : inclination [deg]
-    raan_deg : RAAN / Ω [deg]
-    argp_deg : argument of perigee / ω [deg]
+    raan_deg : RAAN / Omega [deg]
+    argp_deg : argument of perigee / omega [deg]
     M_deg    : mean anomaly [deg]
 
     Returns
@@ -371,7 +371,7 @@ def keplerian_to_state(a_km:     float,
     Om  = math.radians(raan_deg)
     w   = math.radians(argp_deg)
 
-    # Eccentric anomaly → true anomaly
+    # Eccentric anomaly -> true anomaly
     E   = math.radians(solve_kepler(M_deg, ecc))
     nu  = 2.0 * math.atan2(
         math.sqrt(1.0 + ecc) * math.sin(E / 2.0),
@@ -389,12 +389,12 @@ def keplerian_to_state(a_km:     float,
     vx_p = -sqrt_mu_p * math.sin(nu)
     vy_p =  sqrt_mu_p * (ecc + math.cos(nu))
 
-    # Perifocal → ECI rotation  (Rz(−Ω) · Rx(−i) · Rz(−ω))
+    # Perifocal -> ECI rotation  (Rz(-Omega) * Rx(-i) * Rz(-omega))
     cO, sO = math.cos(Om), math.sin(Om)
     ci, si = math.cos(i),  math.sin(i)
     cw, sw = math.cos(w),  math.sin(w)
 
-    # P̂ and Q̂ column vectors of the rotation matrix
+    # P and Q column vectors of the rotation matrix
     Px =  cO * cw - sO * sw * ci
     Py =  sO * cw + cO * sw * ci
     Pz =  sw * si
@@ -411,7 +411,7 @@ def keplerian_to_state(a_km:     float,
     return pos, vel
 
 
-# ── Pipeline functions ────────────────────────────────────────────────────────
+# -- Pipeline functions --------------------------------------------------------
 
 def keplerian_to_lla(a_km:     float,
                       ecc:      float,
@@ -422,21 +422,21 @@ def keplerian_to_lla(a_km:     float,
                       t:        datetime,
                       **_) -> tuple[float, float, float]:
     """
-    Keplerian elements + epoch → subsatellite geodetic position.
+    Keplerian elements + epoch -> subsatellite geodetic position.
 
     Computes the ECI state from the elements, rotates to ECR using GMST at t,
     then converts to geodetic LLA.
 
     Parameters
     ----------
-    a_km … M_deg : orbital elements (see keplerian_to_state)
+    a_km ... M_deg : orbital elements (see keplerian_to_state)
     t            : UTC epoch (aware or naive datetime; naive assumed UTC)
 
     Returns
     -------
     (lat_deg, lon_deg, alt_km) : geodetic subsatellite point
-        lat_deg  −90 … +90
-        lon_deg  −180 … +180  (from atan2)
+        lat_deg  -90 ... +90
+        lon_deg  -180 ... +180  (from atan2)
         alt_km   altitude above WGS-84 ellipsoid [km]
     """
     pos, _ = keplerian_to_state(a_km, ecc, incl_deg, raan_deg, argp_deg, M_deg)
@@ -449,7 +449,7 @@ def lla_to_keplerian(lat_deg:     float,
                       vel_eci_kms: np.ndarray,
                       t:           datetime) -> dict:
     """
-    Satellite geodetic position + ECI velocity + epoch → Keplerian elements.
+    Satellite geodetic position + ECI velocity + epoch -> Keplerian elements.
 
     A position alone does not define an orbit; the ECI velocity must be
     supplied.  Use ``keplerian_to_state`` to generate a consistent velocity

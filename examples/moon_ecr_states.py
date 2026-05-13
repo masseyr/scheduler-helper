@@ -1,13 +1,13 @@
 """
-Moon ECR state vectors — JPL DE432s vs ELP2000/82 comparison.
+Moon ECR state vectors -- JPL DE432s vs ELP2000/82 comparison.
 
 Run with:
     python examples/moon_ecr_states.py
 
 Prints three tables for each epoch:
-  1. JPL  — position/velocity from moon_jpl.py  (DE432s kernel, high accuracy)
-  2. ELP  — position/velocity from moon_eci.py  (Meeus ELP2000/82 + IAU 1980 nutation)
-  3. Diff — |pos_jpl - pos_elp| and |vel_jpl - vel_elp|
+  1. JPL  -- position/velocity from moon_jpl.py  (DE432s kernel, high accuracy)
+  2. ELP  -- position/velocity from moon_eci.py  (Meeus ELP2000/82 + IAU 1980 nutation)
+  3. Diff -- |pos_jpl - pos_elp| and |vel_jpl - vel_elp|
 
 Edit TIMES below to choose your epochs.
 de432s.bsp covers 1949-12-14 to 2050-01-02; keep all epochs within this range.
@@ -20,7 +20,7 @@ import numpy as np
 from tasking_helper.utils.moon_jpl import moon_state_ecr as jpl_state_ecr, setup
 from tasking_helper.utils.moon_eci import moon_state_ecr as elp_state_ecr
 
-# ── Configure epochs here ─────────────────────────────────────────────────────
+# -- Configure epochs here -----------------------------------------------------
 
 # Option A: explicit list of datetimes
 TIMES = [
@@ -59,7 +59,7 @@ TIMES = [
 # TIMES = [_START + timedelta(seconds=_STEP_S * i) for i in range(_N)]
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# -- Helpers -------------------------------------------------------------------
 
 _W_EPOCH = 26
 _W_XYZ   = 14
@@ -113,7 +113,7 @@ def _print_table(title: str, hdr: str, rows: list[str]) -> None:
     print()
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# -- Main ----------------------------------------------------------------------
 
 def main() -> None:
     bsp = setup()

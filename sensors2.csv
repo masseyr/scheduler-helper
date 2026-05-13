@@ -1,0 +1,2 @@
+name,sensor_type,aperture_m,focal_len_mm,pixel_um,exposure_s,qe,read_noise_e,snr_threshold,vizmag_limit,loop_gain_db,freq_ghz,power_kw,ant_gain_db,pulse_us,prf_hz,noise_fig_db,n_pulses,losses_db,sensor_alt_km,sensor_incl_deg,wavelength_um,netd_mk,integration_ms,frame_rate_hz,for_shape,for_boresight_az,for_boresight_el,for_width_deg,for_height_deg,for_custom_points
+Sensor 1,Ground Optical,0.5,2000.0,6.5,0.01,0.8,5.0,5.0,14.0,20.0,,,,,,,,,,,,,,,Custom,0.0,90.0,10.0,10.0,[[12.0 33.0] [13.0 45.0] [16.0 55.0]]

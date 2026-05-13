@@ -1,4 +1,4 @@
-"""Quick validation of keplerian.py — run with python examples/_test_keplerian.py."""
+"""Quick validation of keplerian.py -- run with python examples/_test_keplerian.py."""
 import math
 import numpy as np
 from datetime import datetime, timezone
@@ -19,7 +19,7 @@ def check(label, err_m, tol_m=1.0):
     return ok
 
 
-# ── Kepler's equation ─────────────────────────────────────────────────────────
+# -- Kepler's equation ---------------------------------------------------------
 print("=== Kepler's equation  M = E - e*sin(E) ===")
 cases = [(0, 0.0), (45, 0.01), (180, 0.3), (270, 0.7), (90, 0.95), (1, 0.999)]
 for M, e in cases:
@@ -30,7 +30,7 @@ for M, e in cases:
     print(f"  {'[OK]' if ok else '[FAIL]'} M={M:6.1f}  e={e:.3f}  E={E:10.5f}  "
           f"residual={abs(M_rec-M%360):.2e} deg")
 
-# ── LLA <-> ECR ──────────────────────────────────────────────────────────────
+# -- LLA <-> ECR --------------------------------------------------------------
 print()
 print("=== LLA <-> ECR round-trip (WGS-84) ===")
 lla_cases = [
@@ -50,7 +50,7 @@ for name, lat, lon, alt in lla_cases:
     err    = math.sqrt(d_lat**2 + d_lon**2 + d_alt**2)
     check(name, err, tol_m=0.001)
 
-# ── ECI <-> ECR ──────────────────────────────────────────────────────────────
+# -- ECI <-> ECR --------------------------------------------------------------
 print()
 print("=== ECI <-> ECR round-trip ===")
 t = datetime(2025, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
@@ -62,7 +62,7 @@ for r_eci in [np.array([6500.0, 1000.0, 2500.0]),
     err    = np.linalg.norm(r_back - r_eci) * 1e3
     check(f"r_eci={r_eci}", err, tol_m=0.001)
 
-# ── state_to_keplerian <-> keplerian_to_state ─────────────────────────────────
+# -- state_to_keplerian <-> keplerian_to_state ---------------------------------
 print()
 print("=== Orbital elements round-trip: keplerian_to_state -> state_to_keplerian ===")
 
@@ -96,7 +96,7 @@ for name, elems0 in orbit_cases:
     if not ok:
         all_ok = False
 
-# ── keplerian_to_lla pipeline ─────────────────────────────────────────────────
+# -- keplerian_to_lla pipeline -------------------------------------------------
 print()
 print("=== keplerian_to_lla -> lla_to_keplerian pipeline ===")
 t = datetime(2025, 6, 1, 12, 0, 0, tzinfo=timezone.utc)

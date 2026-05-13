@@ -1,13 +1,13 @@
 """
-moon_eci — Moon ECI/ECR state vectors via truncated ELP2000/82 series.
+moon_eci -- Moon ECI/ECR state vectors via truncated ELP2000/82 series.
 
 Implements Meeus "Astronomical Algorithms" 2nd ed., Chapters 22 and 47.
 Includes the full 60-term tables for longitude/distance and latitude,
 IAU 1976 precession, and IAU 1980 nutation (63-term table).
 
-Typical accuracy over 2025–2050 (vs JPL DE432s):
-  position  ≲ 100 km  (truncated ELP2000/82 inherent; epoch-dependent)
-  velocity  ≲ 0.2 m/s  (central finite-difference, dt = 1 s)
+Typical accuracy over 2025-2050 (vs JPL DE432s):
+  position  <~ 100 km  (truncated ELP2000/82 inherent; epoch-dependent)
+  velocity  <~ 0.2 m/s  (central finite-difference, dt = 1 s)
 
 For position accuracy < 10 km use moon_jpl.py (JPL DE kernel).
 
@@ -19,7 +19,7 @@ moon_pos_eci(t)    -> np.ndarray (3,)  [km]        ECI J2000.0
 moon_state_eci(t)  -> (pos [km], vel [km/s])       ECI J2000.0
 moon_pos_ecr(t)    -> np.ndarray (3,)  [km]        ECR (ECEF)
 moon_state_ecr(t)  -> (pos [km], vel [km/s])       ECR (ECEF)
-eci_to_ecr(pos, t) -> np.ndarray (3,)  [km]        generic ECI→ECR helper
+eci_to_ecr(pos, t) -> np.ndarray (3,)  [km]        generic ECI->ECR helper
 """
 
 from __future__ import annotations
@@ -42,15 +42,15 @@ __all__ = [
 # Earth's rotation rate [rad/s]  (IAU)
 _OMEGA_E = 7.292115e-5
 
-# ── J2000 Julian Date ─────────────────────────────────────────────────────────
+# -- J2000 Julian Date ---------------------------------------------------------
 _J2000 = 2_451_545.0
 
-# ── Meeus Table 47.A ──────────────────────────────────────────────────────────
-# Periodic terms for longitude Σl (units: 1e-6 deg) and
-# distance Σr (units: 1e-3 km).
-# Columns: D, M, M', F, Σl_coeff, Σr_coeff
+# -- Meeus Table 47.A ----------------------------------------------------------
+# Periodic terms for longitude Sigmal (units: 1e-6 deg) and
+# distance Sigmar (units: 1e-3 km).
+# Columns: D, M, M', F, Sigmal_coeff, Sigmar_coeff
 _TABLE_LR = (
-    # D   M   M'  F     Σl          Σr
+    # D   M   M'  F     Sigmal          Sigmar
     ( 0,  0,  1,  0,  6288774, -20905355),
     ( 2,  0, -1,  0,  1274027,  -3699111),
     ( 2,  0,  0,  0,   658314,  -2955968),
@@ -113,11 +113,11 @@ _TABLE_LR = (
     ( 2,  0, -1, -2,        0,      8752),
 )
 
-# ── Meeus Table 47.B ──────────────────────────────────────────────────────────
-# Periodic terms for latitude Σb (units: 1e-6 deg).
-# Columns: D, M, M', F, Σb_coeff
+# -- Meeus Table 47.B ----------------------------------------------------------
+# Periodic terms for latitude Sigmab (units: 1e-6 deg).
+# Columns: D, M, M', F, Sigmab_coeff
 _TABLE_B = (
-    # D   M   M'  F     Σb
+    # D   M   M'  F     Sigmab
     ( 0,  0,  0,  1,  5128122),
     ( 0,  0,  1,  1,   280602),
     ( 0,  0,  1, -1,   277693),
@@ -181,13 +181,13 @@ _TABLE_B = (
 )
 
 
-# ── IAU 1980 nutation table (Meeus Table 22.A, 63 terms) ─────────────────────
-# Columns: l  l'  F  D  Ω | ψ_sin  ψ_T×10 | ε_cos  ε_T×10
+# -- IAU 1980 nutation table (Meeus Table 22.A, 63 terms) ---------------------
+# Columns: l  l'  F  D  Omega | psi_sin  psi_Tx10 | eps_cos  eps_Tx10
 # All coefficients in units of 0.0001 arcsec (or 0.0001 arcsec/century for T).
 # Multiply T coefficient by T/10 during evaluation.
-# arg = l*Mp + l'*M + F*F + D*D + Ω*Ω  (radians)
+# arg = l*Mp + l'*M + F*F + D*D + Omega*Omega  (radians)
 _NUT_TABLE = (
-    # l   l'   F   D   Ω    ψ_sin    ψ_T×10   ε_cos   ε_T×10
+    # l   l'   F   D   Omega    psi_sin    psi_Tx10   eps_cos   eps_Tx10
     ( 0,   0,   0,  0,  1, -171996,   -1742,   92025,     89),
     (-2,   0,   0,  2,  2,  -13187,     -16,    5736,    -31),
     ( 0,   0,   0,  2,  2,   -2274,      -2,     977,     -5),
@@ -253,7 +253,7 @@ _NUT_TABLE = (
     ( 2,  -1,   0,  2,  2,      -3,       0,       1,      0),
 )
 
-# ── Internal helpers ──────────────────────────────────────────────────────────
+# -- Internal helpers ----------------------------------------------------------
 
 def _rz(a: float) -> np.ndarray:
     c, s = math.cos(a), math.sin(a)
@@ -275,8 +275,8 @@ def _precess_to_j2000(r_date: np.ndarray, T: float) -> np.ndarray:
     zeta_A = (2306.2181 * T + 1.39656  * T**2 - 0.000139 * T**3) * as2r
     theta_A = (2004.3109 * T - 0.85330  * T**2 - 0.000217 * T**3) * as2r
     z_A     = (2306.2181 * T + 1.09468  * T**2 + 0.018203 * T**3) * as2r
-    # P = Rz(-z_A) · Ry(θ_A) · Rz(-ζ_A)  rotates J2000 → of-date
-    # P^T rotates of-date → J2000
+    # P = Rz(-z_A) * Ry(theta_A) * Rz(-zeta_A)  rotates J2000 -> of-date
+    # P^T rotates of-date -> J2000
     P = _rz(-z_A) @ _ry(theta_A) @ _rz(-zeta_A)
     return P.T @ r_date
 
@@ -288,7 +288,7 @@ def _nutation(
     F_r: float,
     D_r: float,
 ) -> tuple[float, float]:
-    """IAU 1980 nutation: returns (Δψ, Δε) in radians (Meeus Ch. 22)."""
+    """IAU 1980 nutation: returns (Deltapsi, Deltaeps) in radians (Meeus Ch. 22)."""
     Om = (125.04452
           - 1934.136261 * T
           + 0.0020708   * T**2
@@ -301,7 +301,7 @@ def _nutation(
         dpsi += (psi_s + psi_T * T / 10.0) * math.sin(arg)
         deps += (eps_c + eps_T * T / 10.0) * math.cos(arg)
 
-    # 0.0001 arcsec → radians
+    # 0.0001 arcsec -> radians
     as2r = math.pi / (180.0 * 3600.0)
     return dpsi * 1e-4 * as2r, deps * 1e-4 * as2r
 
@@ -310,7 +310,7 @@ def _moon_pos_eci_jd(jd: float) -> np.ndarray:
     """Moon position [km] in ECI J2000.0 for a given Julian Date."""
     T = (jd - _J2000) / 36525.0
 
-    # ── Fundamental arguments (degrees) ──────────────────────────────────────
+    # -- Fundamental arguments (degrees) --------------------------------------
     Lp = (218.3164477
           + 481267.88123421 * T
           - 0.0015786       * T**2
@@ -351,7 +351,7 @@ def _moon_pos_eci_jd(jd: float) -> np.ndarray:
 
     dpsi, deps = _nutation(T, Mp_r, M_r, F_r, D_r)
 
-    # ── Σl and Σr ─────────────────────────────────────────────────────────────
+    # -- Sigmal and Sigmar -------------------------------------------------------------
     Sl = Sr = 0.0
     for D_c, M_c, Mp_c, F_c, sl, sr in _TABLE_LR:
         arg = D_c * D_r + M_c * M_r + Mp_c * Mp_r + F_c * F_r
@@ -363,7 +363,7 @@ def _moon_pos_eci_jd(jd: float) -> np.ndarray:
            + 1962.0 * math.sin(Lp_r - F_r)
            +  318.0 * math.sin(A2_r))
 
-    # ── Σb ────────────────────────────────────────────────────────────────────
+    # -- Sigmab --------------------------------------------------------------------
     Sb = 0.0
     for D_c, M_c, Mp_c, F_c, sb in _TABLE_B:
         arg = D_c * D_r + M_c * M_r + Mp_c * Mp_r + F_c * F_r
@@ -377,13 +377,13 @@ def _moon_pos_eci_jd(jd: float) -> np.ndarray:
            +  127.0 * math.sin(Lp_r - Mp_r)
            -  115.0 * math.sin(Lp_r + Mp_r))
 
-    # ── Ecliptic longitude, latitude, distance ────────────────────────────────
-    # dpsi converts mean → apparent (true) ecliptic longitude
+    # -- Ecliptic longitude, latitude, distance --------------------------------
+    # dpsi converts mean -> apparent (true) ecliptic longitude
     lam  = math.radians((Lp + Sl / 1e6) % 360.0) + dpsi
     beta = math.radians(Sb / 1e6)
     dist = 385000.56 + Sr / 1e3      # km
 
-    # ── True obliquity of the ecliptic (mean + nutation in obliquity) ─────────
+    # -- True obliquity of the ecliptic (mean + nutation in obliquity) ---------
     eps = math.radians(
         23.439291111
         - 0.013004167 * T
@@ -392,7 +392,7 @@ def _moon_pos_eci_jd(jd: float) -> np.ndarray:
     ) + deps
     
 
-    # ── Ecliptic → mean equatorial of date ────────────────────────────────────
+    # -- Ecliptic -> mean equatorial of date ------------------------------------
     cos_b, sin_b = math.cos(beta), math.sin(beta)
     cos_l, sin_l = math.cos(lam),  math.sin(lam)
     cos_e, sin_e = math.cos(eps),  math.sin(eps)
@@ -403,13 +403,13 @@ def _moon_pos_eci_jd(jd: float) -> np.ndarray:
 
     r_date = np.array([x, y, z])
 
-    # ── Precess to J2000.0 ────────────────────────────────────────────────────
+    # -- Precess to J2000.0 ----------------------------------------------------
     _pr = _precess_to_j2000(r_date, T)
     print(round(jd,5), eps, _pr)
     return _pr
 
 
-# ── Public API ────────────────────────────────────────────────────────────────
+# -- Public API ----------------------------------------------------------------
 
 def moon_pos_eci(t: datetime) -> np.ndarray:
     """
@@ -437,7 +437,7 @@ def moon_state_eci(
     """
     Moon position [km] and velocity [km/s] in ECI J2000.0 for UTC datetime *t*.
 
-    Velocity is estimated by a centred finite difference of width 2·*dt_s*.
+    Velocity is estimated by a centred finite difference of width 2**dt_s*.
 
     Parameters
     ----------
@@ -458,7 +458,7 @@ def moon_state_eci(
     return pos, vel
 
 
-# ── ECR (ECEF) helpers ────────────────────────────────────────────────────────
+# -- ECR (ECEF) helpers --------------------------------------------------------
 
 def _gmst_rad(jd: float) -> float:
     """Greenwich Mean Sidereal Time [rad] for Julian Date *jd* (Meeus Ch. 12)."""
@@ -517,7 +517,7 @@ def moon_state_ecr(
     Moon position [km] and velocity [km/s] in ECR (ECEF) for UTC datetime *t*.
 
     The ECR velocity accounts for Earth's rotation:
-        v_ecr = R(θ)·v_eci − ω_E × r_ecr
+        v_ecr = R(theta)*v_eci - omega_E x r_ecr
 
     Parameters
     ----------
