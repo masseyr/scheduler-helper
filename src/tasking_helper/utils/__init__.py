@@ -48,9 +48,11 @@ from .keplerian import (
     ecr_to_eci,
     state_to_keplerian,
     keplerian_to_state,
+    eci_to_true_anomaly,
     solve_kepler,
     keplerian_to_lla,
     lla_to_keplerian,
+    lla_to_mean_anomaly,
 )
 from .coverage import (
     EphemerisInterpolator,
@@ -102,9 +104,11 @@ __all__ = [
     "ecr_to_eci",
     "state_to_keplerian",
     "keplerian_to_state",
+    "eci_to_true_anomaly",
     "solve_kepler",
     "keplerian_to_lla",
     "lla_to_keplerian",
+    "lla_to_mean_anomaly",
     "EphemerisInterpolator",
     "GroundSensor",
     "AccessInterval",

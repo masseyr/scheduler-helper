@@ -85,10 +85,12 @@ __all__ = [
     # Orbital mechanics
     "state_to_keplerian",
     "keplerian_to_state",
+    "eci_to_true_anomaly",
     "solve_kepler",
     # Pipelines
     "keplerian_to_lla",
     "lla_to_keplerian",
+    "lla_to_mean_anomaly",
 ]
 
 # -- Constants -----------------------------------------------------------------
@@ -338,6 +340,54 @@ def state_to_keplerian(pos_km: np.ndarray,
     }
 
 
+def eci_to_true_anomaly(pos_km: np.ndarray, vel_kms: np.ndarray) -> float:
+    """
+    Compute true anomaly [deg] from an ECI state vector.
+
+    Parameters
+    ----------
+    pos_km  : ECI position  [km]    shape (3,)
+    vel_kms : ECI velocity  [km/s]  shape (3,)
+
+    Returns
+    -------
+    nu_deg : true anomaly [deg]  0 ... 360
+
+    Notes
+    -----
+    For near-circular orbits (ecc < 1e-4) periapsis is undefined, so the
+    argument of latitude (omega + nu) is returned instead.  For near-
+    equatorial circular orbits the angle is measured from the +X ECI axis.
+    This matches the convention used by state_to_keplerian.
+    """
+    r_v = np.asarray(pos_km,  dtype=float)
+    v_v = np.asarray(vel_kms, dtype=float)
+    r   = float(np.linalg.norm(r_v))
+
+    h_v = np.cross(r_v, v_v)
+    h   = float(np.linalg.norm(h_v))
+    n_v = np.cross([0.0, 0.0, 1.0], h_v)   # ascending-node vector
+    n   = float(np.linalg.norm(n_v))
+
+    e_v = np.cross(v_v, h_v) / MU - r_v / r
+    ecc = float(np.linalg.norm(e_v))
+
+    if ecc < 1e-10:
+        # Near-circular: return argument of latitude
+        if n < 1e-10:
+            nu = math.atan2(r_v[1], r_v[0])
+        else:
+            nu = math.acos(max(-1.0, min(1.0, np.dot(n_v, r_v) / (n * r))))
+            if np.dot(r_v, v_v) < 0:
+                nu = TWO_PI - nu
+    else:
+        nu = math.acos(max(-1.0, min(1.0, np.dot(e_v, r_v) / (ecc * r))))
+        if np.dot(r_v, v_v) < 0:
+            nu = TWO_PI - nu
+
+    return math.degrees(nu) % 360.0
+
+
 def keplerian_to_state(a_km:     float,
                         ecc:      float,
                         incl_deg: float,
@@ -469,3 +519,77 @@ def lla_to_keplerian(lat_deg:     float,
     """
     pos_eci = lla_to_eci(lat_deg, lon_deg, alt_km, t)
     return state_to_keplerian(pos_eci, np.asarray(vel_eci_kms, dtype=float))
+
+
+def lla_to_mean_anomaly(
+    lat_deg:  float,
+    lon_deg:  float,
+    alt_km:   float,
+    t:        datetime,
+    incl_deg: float,
+    raan_deg: float,
+    argp_deg: float,
+    ecc:      float,
+) -> float:
+    """
+    Compute mean anomaly from a subsatellite LLA position and known orbit shape.
+
+    When the orbit's five shape/orientation elements are already known (from a
+    TLE, for example) but M is not, this function recovers M from the observed
+    subsatellite point without needing the velocity vector.
+
+    The ECI position is projected onto the perifocal P/Q axes to get true
+    anomaly nu, which is then converted nu -> E -> M.
+
+    Parameters
+    ----------
+    lat_deg  : geodetic latitude  [deg]
+    lon_deg  : longitude          [deg]
+    alt_km   : altitude above WGS-84 ellipsoid [km]
+    t        : UTC epoch (aware or naive datetime; naive assumed UTC)
+    incl_deg : inclination [deg]
+    raan_deg : RAAN / Omega [deg]
+    argp_deg : argument of perigee [deg]
+    ecc      : eccentricity (0 <= ecc < 1)
+
+    Returns
+    -------
+    M_deg : mean anomaly [deg]  0 ... 360
+
+    Notes
+    -----
+    For near-circular orbits (ecc < 1e-4) argp is ill-defined, so the
+    returned value is the mean argument of latitude (M + argp), consistent
+    with the convention in state_to_keplerian.
+    """
+    r_eci = lla_to_eci(lat_deg, lon_deg, alt_km, t)
+
+    Om = math.radians(raan_deg)
+    i  = math.radians(incl_deg)
+    w  = math.radians(argp_deg)
+
+    # Perifocal P and Q unit vectors in ECI (same as keplerian_to_state)
+    cO, sO = math.cos(Om), math.sin(Om)
+    ci, si = math.cos(i),  math.sin(i)
+    cw, sw = math.cos(w),  math.sin(w)
+
+    Px =  cO * cw - sO * sw * ci
+    Py =  sO * cw + cO * sw * ci
+    Pz =  sw * si
+    Qx = -cO * sw - sO * cw * ci
+    Qy = -sO * sw + cO * cw * ci
+    Qz =  cw * si
+
+    rP = float(r_eci[0] * Px + r_eci[1] * Py + r_eci[2] * Pz)
+    rQ = float(r_eci[0] * Qx + r_eci[1] * Qy + r_eci[2] * Qz)
+
+    nu = math.atan2(rQ, rP)   # true anomaly (or arg of latitude if near-circular)
+
+    # nu -> eccentric anomaly -> mean anomaly
+    E = 2.0 * math.atan2(
+        math.sqrt(max(0.0, 1.0 - ecc)) * math.sin(nu / 2.0),
+        math.sqrt(max(0.0, 1.0 + ecc)) * math.cos(nu / 2.0),
+    )
+    M = (E - ecc * math.sin(E)) % TWO_PI
+
+    return math.degrees(M) % 360.0
