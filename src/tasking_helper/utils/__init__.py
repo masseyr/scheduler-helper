@@ -54,6 +54,7 @@ from .keplerian import (
     lla_to_keplerian,
     lla_to_mean_anomaly,
 )
+from .stk_ephem import StkEphemeris, load_stk_ephemeris
 from .coverage import (
     EphemerisInterpolator,
     GroundSensor,
@@ -109,6 +110,8 @@ __all__ = [
     "keplerian_to_lla",
     "lla_to_keplerian",
     "lla_to_mean_anomaly",
+    "StkEphemeris",
+    "load_stk_ephemeris",
     "EphemerisInterpolator",
     "GroundSensor",
     "AccessInterval",
