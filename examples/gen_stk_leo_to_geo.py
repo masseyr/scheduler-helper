@@ -1,0 +1,458 @@
+"""
+gen_stk_leo_to_geo.py -- Generate STK ephemeris (.e) files for a LEO-to-GEO
+                          Hohmann transfer and an optional ASAT direct-ascent
+                          trajectory in J2000 ECI.
+
+Hohmann trajectory design
+-------------------------
+The transfer ellipse has:
+    Perigee : 300 km  (LEO insertion altitude)
+    Apogee  : 35 786 km  (geostationary altitude)
+
+The Keplerian half-period (perigee -> apogee) is ~5.27 h, so a 6-hour
+simulation captures the complete outbound parabolic trajectory from LEO to
+GEO and a short return leg.
+
+The 300-km starting point can be placed at any geographic location by
+supplying --start-lat and --start-lon.  RAAN and argument of perigee are
+derived automatically so that the orbit passes through that point at t=0
+(ascending pass through the perigee).
+
+ASAT direct-ascent trajectory
+------------------------------
+An optional non-ballistic direct-ascent interceptor trajectory can be
+generated alongside the transfer.  The interceptor launches from a ground
+site (default: Cape Canaveral 28.5 N, 80.6 W) and ascends along a
+great-circle arc in the ECI frame, reaching the target's position at the
+specified intercept time.
+
+Output
+------
+STK v10 EphemerisTimePosVel files, 10-second cadence, coordinate system J2000.
+
+Usage
+-----
+    python examples/gen_stk_leo_to_geo.py [options] [output]
+
+    --start-lat LAT   Geodetic latitude of 300-km perigee start point [deg]
+    --start-lon LON   Longitude of 300-km perigee start point [deg]
+    --asat-out  PATH  Also generate an ASAT direct-ascent file at this path
+    --asat-lat  LAT   ASAT launch site latitude  [deg, default 28.5]
+    --asat-lon  LON   ASAT launch site longitude [deg, default -80.6]
+    --intercept-t  S  Intercept time from epoch  [s,   default 1800]
+
+    Default Hohmann output: leo_to_geo_transfer.e in the current directory.
+"""
+
+import argparse
+import math
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+import numpy as np
+
+# -- Project imports ---------------------------------------------------------
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from tasking_helper.utils.keplerian import keplerian_to_state, solve_kepler, lla_to_eci
+
+# ---------------------------------------------------------------------------
+# Orbit parameters
+# ---------------------------------------------------------------------------
+
+R_EARTH = 6378.137       # WGS-84 equatorial radius [km]
+MU      = 398600.4418    # Earth gravitational parameter [km^3/s^2]
+
+ALT_PERIGEE_KM = 300.0            # LEO perigee altitude
+ALT_APOGEE_KM  = 35_786.0        # GEO apogee altitude
+
+r_p = R_EARTH + ALT_PERIGEE_KM   # perigee radius [km]
+r_a = R_EARTH + ALT_APOGEE_KM    # apogee radius [km]
+
+A_KM = (r_p + r_a) / 2.0         # semi-major axis
+ECC  = (r_a - r_p) / (r_a + r_p) # eccentricity
+
+INCL_DEG = 28.5   # inclination
+
+# ---------------------------------------------------------------------------
+# Simulation parameters
+# ---------------------------------------------------------------------------
+
+EPOCH      = datetime(2027, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+DURATION_S = 6 * 3600   # 6 hours
+DT_S       = 10.0        # cadence [s]
+
+# ---------------------------------------------------------------------------
+# STK file helpers
+# ---------------------------------------------------------------------------
+
+_MONTH_ABBR = {
+    1: "Jan", 2: "Feb", 3: "Mar",  4: "Apr",  5: "May",  6: "Jun",
+    7: "Jul", 8: "Aug", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dec",
+}
+
+
+def _stk_epoch(dt: datetime) -> str:
+    ms = dt.microsecond // 1000
+    return (f"{dt.day} {_MONTH_ABBR[dt.month]} {dt.year} "
+            f"{dt.hour:02d}:{dt.minute:02d}:{dt.second:02d}.{ms:03d}")
+
+
+def write_stk_ephem(
+    path: str,
+    epoch: datetime,
+    time_pos_vel: list,
+    comments: list = None,
+) -> None:
+    """Write an STK v10 EphemerisTimePosVel file."""
+    n_pts = len(time_pos_vel)
+    lines = [
+        "stk.v.10.0",
+        "",
+        "BEGIN Ephemeris",
+        "",
+        f"NumberOfEphemerisPoints  {n_pts}",
+        f"ScenarioEpoch            {_stk_epoch(epoch)}",
+        "InterpolationMethod      Lagrange",
+        "InterpolationOrder       8",
+        "CentralBody              Earth",
+        "CoordinateSystem         J2000",
+        "DistanceUnit             Kilometers",
+        "",
+    ]
+    if comments:
+        for c in comments:
+            lines.append(f"# {c}")
+        lines.append("")
+
+    lines.append("EphemerisTimePosVel")
+    lines.append("")
+
+    for t_s, pos, vel in time_pos_vel:
+        lines.append(
+            f"{t_s:>20.6f}"
+            f"  {pos[0]:>18.9e}  {pos[1]:>18.9e}  {pos[2]:>18.9e}"
+            f"  {vel[0]:>16.9e}  {vel[1]:>16.9e}  {vel[2]:>16.9e}"
+        )
+
+    lines += ["", "END Ephemeris", ""]
+    Path(path).write_text("\n".join(lines), encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Trajectory helpers
+# ---------------------------------------------------------------------------
+
+def _slerp(u0: np.ndarray, u1: np.ndarray, t: float) -> np.ndarray:
+    """Spherical linear interpolation between unit vectors at fraction t."""
+    omega = math.acos(max(-1.0, min(1.0, float(np.dot(u0, u1)))))
+    if omega < 1e-10:
+        return u0 + t * (u1 - u0)
+    s = math.sin(omega)
+    return (math.sin((1.0 - t) * omega) * u0 + math.sin(t * omega) * u1) / s
+
+
+def start_point_to_elements(
+    lat_deg: float,
+    lon_deg: float,
+    incl_deg: float,
+    epoch: datetime,
+) -> tuple:
+    """
+    Compute (RAAN_deg, ARGP_deg) for a Hohmann orbit whose perigee (300 km)
+    lies at the given geographic location at t=0 (ascending pass).
+
+    Uses the constraint that the orbit plane normal is perpendicular to the
+    perigee position vector to solve for RAAN, then derives ARGP from the
+    angle between the ascending node and the perigee direction.
+
+    Raises ValueError if |geocentric declination| > inclination.
+    """
+    r_eci = np.array(lla_to_eci(lat_deg, lon_deg, ALT_PERIGEE_KM, epoch))
+    r     = float(np.linalg.norm(r_eci))
+    e_hat = r_eci / r
+
+    sin_delta = r_eci[2] / r
+    incl      = math.radians(incl_deg)
+    sin_incl  = math.sin(incl)
+    cos_incl  = math.cos(incl)
+    cos_delta = math.sqrt(max(0.0, 1.0 - sin_delta ** 2))
+
+    if abs(sin_delta) > abs(sin_incl) + 1e-9:
+        raise ValueError(
+            f"Start latitude {lat_deg:.2f}° unreachable at inclination {incl_deg:.2f}° "
+            f"(geocentric dec {math.degrees(math.asin(sin_delta)):.2f}°)"
+        )
+
+    # Solve sin(RAAN - phi) = -cot(i) * tan(delta)
+    phi   = math.atan2(r_eci[1], r_eci[0])
+    ratio = -(cos_incl / sin_incl) * (sin_delta / cos_delta) if cos_delta > 1e-10 else 0.0
+    alpha = math.asin(max(-1.0, min(1.0, ratio)))
+
+    raan_candidates = [
+        (phi + alpha)              % (2 * math.pi),
+        (phi + math.pi - alpha)   % (2 * math.pi),
+    ]
+
+    # Select the ascending-pass solution (northward velocity at start)
+    raan = raan_candidates[0]
+    for raan_c in raan_candidates:
+        h_hat = np.array([sin_incl * math.sin(raan_c),
+                          -sin_incl * math.cos(raan_c),
+                          cos_incl])
+        if np.cross(h_hat, e_hat)[2] >= 0.0:
+            raan = raan_c
+            break
+
+    h_hat = np.array([sin_incl * math.sin(raan),
+                      -sin_incl * math.cos(raan),
+                      cos_incl])
+
+    # Ascending node direction: N = z x h
+    N     = np.cross(np.array([0.0, 0.0, 1.0]), h_hat)
+    N_mag = float(np.linalg.norm(N))
+    N_hat = N / N_mag if N_mag > 1e-10 else np.array([1.0, 0.0, 0.0])
+
+    # ARGP: signed angle from ascending node to perigee direction in orbital plane
+    argp = math.atan2(
+        float(np.dot(np.cross(N_hat, e_hat), h_hat)),
+        float(np.dot(N_hat, e_hat)),
+    )
+
+    return math.degrees(raan) % 360.0, math.degrees(argp) % 360.0
+
+
+# ---------------------------------------------------------------------------
+# Keplerian propagation
+# ---------------------------------------------------------------------------
+
+def propagate_keplerian(
+    a_km:      float,
+    ecc:       float,
+    incl_deg:  float,
+    raan_deg:  float,
+    argp_deg:  float,
+    M0_deg:    float,
+    duration_s: float,
+    dt_s:       float,
+) -> list:
+    """Propagate a two-body Keplerian orbit; return [(t_s, pos_km, vel_kms)]."""
+    n_rad_s = math.sqrt(MU / a_km ** 3)
+    ts      = np.arange(0.0, duration_s + dt_s * 0.5, dt_s)
+    rows    = []
+    for t_s in ts:
+        M_deg = (M0_deg + math.degrees(n_rad_s * t_s)) % 360.0
+        pos, vel = keplerian_to_state(
+            a_km=a_km, ecc=ecc,
+            incl_deg=incl_deg, raan_deg=raan_deg,
+            argp_deg=argp_deg, M_deg=M_deg,
+        )
+        rows.append((float(t_s), pos, vel))
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# ASAT direct-ascent trajectory
+# ---------------------------------------------------------------------------
+
+def generate_asat_trajectory(
+    target_rows: list,
+    launch_lat_deg: float,
+    launch_lon_deg: float,
+    t_intercept_s: float,
+    epoch: datetime,
+    dt_s: float = 10.0,
+) -> list:
+    """
+    Direct-ascent non-ballistic ASAT trajectory model.
+
+    The interceptor launches from the given ground site and ascends along a
+    great-circle arc in the J2000 ECI frame, reaching the target's ECI
+    position at t_intercept_s.  Altitude increases linearly with time.
+    Velocity is computed as the numerical derivative of the position profile.
+
+    This models a powered/guided (non-ballistic) flight: the vehicle
+    continuously adjusts thrust to follow the arc rather than coasting.
+
+    Parameters
+    ----------
+    target_rows    : Hohmann rows list of (t_s, pos_km, vel_kms)
+    launch_lat_deg : geodetic latitude of ASAT launch site [deg]
+    launch_lon_deg : longitude of launch site [deg]
+    t_intercept_s  : intercept time from epoch [s]
+    epoch          : UTC datetime for t=0
+    dt_s           : time step [s]
+
+    Returns
+    -------
+    list of (t_s, pos_km, vel_kms) from t=0 to t=t_intercept_s
+    """
+    # Interpolate target ECI position at intercept time
+    t_arr = np.array([r[0] for r in target_rows])
+    idx   = int(np.clip(np.searchsorted(t_arr, t_intercept_s), 1, len(target_rows) - 1))
+    t0, p0, _ = target_rows[idx - 1]
+    t1, p1, _ = target_rows[idx]
+    frac_int  = (t_intercept_s - float(t0)) / (float(t1) - float(t0)) if t1 != t0 else 0.0
+    r_target  = np.array(p0, dtype=float) + frac_int * (np.array(p1) - np.array(p0))
+
+    # Launch site ECI position at epoch (t=0)
+    r_launch = np.array(lla_to_eci(launch_lat_deg, launch_lon_deg, 0.0, epoch), dtype=float)
+
+    r_mag_0 = float(np.linalg.norm(r_launch))
+    r_mag_1 = float(np.linalg.norm(r_target))
+    u0      = r_launch / r_mag_0
+    u1      = r_target / r_mag_1
+
+    ts = np.arange(0.0, t_intercept_s + dt_s * 0.5, dt_s)
+    pos_list = []
+    for t_s in ts:
+        frac = t_s / t_intercept_s
+        r_mag = r_mag_0 + (r_mag_1 - r_mag_0) * frac   # linear altitude profile
+        pos_list.append(r_mag * _slerp(u0, u1, frac))
+
+    pos_arr = np.array(pos_list)
+    vel_arr = np.gradient(pos_arr, dt_s, axis=0)
+
+    return [(float(ts[i]), pos_arr[i], vel_arr[i]) for i in range(len(ts))]
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main():
+    ap = argparse.ArgumentParser(
+        description="Generate STK .e ephemeris files for a LEO-to-GEO Hohmann "
+                    "transfer and optional ASAT direct-ascent trajectory."
+    )
+    ap.add_argument(
+        "output", nargs="?", default="leo_to_geo_transfer.e",
+        help="Hohmann transfer output file [default: leo_to_geo_transfer.e]",
+    )
+    ap.add_argument(
+        "--start-lat", type=float, default=None, metavar="DEG",
+        help="Geodetic latitude of the 300-km perigee start point [deg]",
+    )
+    ap.add_argument(
+        "--start-lon", type=float, default=None, metavar="DEG",
+        help="Longitude of the 300-km perigee start point [deg]",
+    )
+    ap.add_argument(
+        "--asat-out", default=None, metavar="PATH",
+        help="Write ASAT direct-ascent trajectory to this .e file",
+    )
+    ap.add_argument(
+        "--asat-lat", type=float, default=28.5, metavar="DEG",
+        help="ASAT launch site latitude [deg, default 28.5 = KSC]",
+    )
+    ap.add_argument(
+        "--asat-lon", type=float, default=-80.6, metavar="DEG",
+        help="ASAT launch site longitude [deg, default -80.6 = KSC]",
+    )
+    ap.add_argument(
+        "--intercept-t", type=float, default=1800.0, metavar="S",
+        help="ASAT intercept time from epoch [s, default 1800 = 30 min]",
+    )
+    args = ap.parse_args()
+
+    # Orbital elements: RAAN and ARGP from start-point or defaults
+    if args.start_lat is not None:
+        lat = args.start_lat
+        lon = args.start_lon if args.start_lon is not None else 0.0
+        raan_deg, argp_deg = start_point_to_elements(lat, lon, INCL_DEG, EPOCH)
+        print(f"Start point       : lat={lat:.2f} deg  lon={lon:.2f} deg  alt={ALT_PERIGEE_KM:.0f} km")
+        print(f"  Derived RAAN    : {raan_deg:.4f} deg")
+        print(f"  Derived ARGP    : {argp_deg:.4f} deg")
+        print()
+    else:
+        raan_deg = 0.0
+        argp_deg = 0.0
+
+    M0_DEG = 0.0   # start at perigee
+
+    n      = math.sqrt(MU / A_KM ** 3)
+    T_s    = 2 * math.pi / n
+    T_half = T_s / 2.0
+
+    print("Hohmann transfer parameters")
+    print(f"  Perigee altitude  : {ALT_PERIGEE_KM:.0f} km  (r = {r_p:.3f} km)")
+    print(f"  Apogee altitude   : {ALT_APOGEE_KM:.0f} km  (r = {r_a:.3f} km)")
+    print(f"  Semi-major axis   : {A_KM:.3f} km")
+    print(f"  Eccentricity      : {ECC:.6f}")
+    print(f"  Inclination       : {INCL_DEG} deg")
+    print(f"  RAAN              : {raan_deg:.4f} deg")
+    print(f"  ARGP              : {argp_deg:.4f} deg")
+    print(f"  Orbital period    : {T_s/3600:.4f} h")
+    print(f"  Half-period       : {T_half/3600:.4f} h  (perigee -> GEO apogee)")
+    print(f"  Simulation        : {DURATION_S/3600:.1f} h  ({DURATION_S/DT_S:.0f} steps at {DT_S:.0f} s)")
+
+    M_end = (M0_DEG + math.degrees(n * DURATION_S)) % 360.0
+    E_end = math.radians(solve_kepler(M_end, ECC))
+    r_end = A_KM * (1.0 - ECC * math.cos(E_end))
+    print(f"  End altitude      : {r_end - R_EARTH:.0f} km  "
+          f"(M = {M_end:.1f} deg, {'past apogee' if M_end > 180 else 'before apogee'})")
+    print()
+
+    print("Propagating Hohmann trajectory ... ", end="", flush=True)
+    rows = propagate_keplerian(
+        A_KM, ECC, INCL_DEG, raan_deg, argp_deg, M0_DEG,
+        DURATION_S, DT_S,
+    )
+    print(f"{len(rows)} points")
+
+    comments = [
+        f"Hohmann transfer: {ALT_PERIGEE_KM:.0f} km LEO -> {ALT_APOGEE_KM:.0f} km GEO",
+        f"a={A_KM:.3f} km  ecc={ECC:.6f}  incl={INCL_DEG} deg",
+        f"RAAN={raan_deg:.4f} deg  ARGP={argp_deg:.4f} deg",
+        f"Half-period (perigee to GEO apogee) = {T_half/3600:.4f} h",
+        f"Simulation covers {DURATION_S/3600:.1f} h starting at perigee (M=0)",
+        "Unperturbed two-body Keplerian propagation",
+    ]
+    write_stk_ephem(args.output, EPOCH, rows, comments=comments)
+    print(f"Written -> {args.output}")
+
+    # Altitude profile sanity check (every 6 min)
+    alts = [(t_s / 3600, float(np.linalg.norm(pos)) - R_EARTH)
+            for t_s, pos, _ in rows[::36]]
+    print()
+    print("Altitude profile (every 6 min):")
+    print(f"  {'Time [h]':>9}  {'Alt [km]':>10}")
+    print("  " + "-" * 22)
+    for t_h, alt in alts:
+        print(f"  {t_h:>9.3f}  {alt:>10.0f}")
+
+    # ASAT direct-ascent trajectory
+    if args.asat_out:
+        t_int = args.intercept_t
+        # Target altitude at intercept
+        t_arr = np.array([r[0] for r in rows])
+        idx   = int(np.clip(np.searchsorted(t_arr, t_int), 1, len(rows) - 1))
+        _, p_int, _ = rows[idx]
+        alt_int = float(np.linalg.norm(p_int)) - R_EARTH
+
+        print()
+        print("ASAT direct-ascent parameters")
+        print(f"  Launch site       : lat={args.asat_lat:.2f} deg  lon={args.asat_lon:.2f} deg  alt=0 km")
+        print(f"  Intercept time    : {t_int:.0f} s  ({t_int/60:.1f} min)")
+        print(f"  Target altitude   : {alt_int:.0f} km  at t={t_int:.0f} s")
+        print()
+
+        print("Propagating ASAT trajectory ... ", end="", flush=True)
+        asat_rows = generate_asat_trajectory(
+            rows, args.asat_lat, args.asat_lon, t_int, EPOCH, DT_S
+        )
+        print(f"{len(asat_rows)} points")
+
+        asat_comments = [
+            "ASAT direct-ascent (non-ballistic) trajectory",
+            f"Launch site: lat={args.asat_lat:.2f} deg  lon={args.asat_lon:.2f} deg  alt=0 km",
+            f"Intercept time: {t_int:.0f} s ({t_int/3600:.4f} h)",
+            f"Target altitude at intercept: {alt_int:.0f} km",
+            "Model: great-circle SLERP ascent in J2000 ECI (powered/guided flight)",
+        ]
+        write_stk_ephem(args.asat_out, EPOCH, asat_rows, comments=asat_comments)
+        print(f"Written -> {args.asat_out}")
+
+
+if __name__ == "__main__":
+    main()
