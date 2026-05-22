@@ -80,7 +80,7 @@ INCL_DEG = 28.5   # inclination
 
 EPOCH      = datetime(2027, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
 DURATION_S = 6 * 3600   # 6 hours
-DT_S       = 10.0        # cadence [s]
+DT_S       = 1.0        # cadence [s]
 
 # ---------------------------------------------------------------------------
 # STK file helpers
@@ -98,44 +98,41 @@ def _stk_epoch(dt: datetime) -> str:
             f"{dt.hour:02d}:{dt.minute:02d}:{dt.second:02d}.{ms:03d}")
 
 
-def write_stk_ephem(
-    path: str,
-    epoch: datetime,
-    time_pos_vel: list,
-    comments: list = None,
-) -> None:
+def write_stk_ephem(path: str,
+                    epoch: datetime,
+                    time_pos_vel: list,
+                    comments: list = None) -> None:
     """Write an STK v10 EphemerisTimePosVel file."""
     n_pts = len(time_pos_vel)
     lines = [
-        "stk.v.10.0",
-        "",
-        "BEGIN Ephemeris",
-        "",
-        f"NumberOfEphemerisPoints  {n_pts}",
-        f"ScenarioEpoch            {_stk_epoch(epoch)}",
-        "InterpolationMethod      Lagrange",
-        "InterpolationOrder       8",
-        "CentralBody              Earth",
-        "CoordinateSystem         J2000",
-        "DistanceUnit             Kilometers",
-        "",
+        "stk.v.12.0\n\n"
     ]
     if comments:
         for c in comments:
             lines.append(f"# {c}")
-        lines.append("")
+    
+    lines += [
+        "\nBEGIN Ephemeris\n",
+        f"  NumberOfEphemerisPoints  {n_pts}\n",
+        f"  ScenarioEpoch            {_stk_epoch(epoch)}\n",
+        "  InterpolationMethod      Lagrange\n",
+        "  InterpolationOrder       8\n",
+        "  CentralBody              Earth\n",
+        "  CoordinateSystem         J2000\n",
+        "    DistanceUnit             Kilometers\n",
+    ]
 
-    lines.append("EphemerisTimePosVel")
-    lines.append("")
+    lines.append("  EphemerisTimePosVel\n")
+
 
     for t_s, pos, vel in time_pos_vel:
         lines.append(
-            f"{t_s:>20.6f}"
-            f"  {pos[0]:>18.9e}  {pos[1]:>18.9e}  {pos[2]:>18.9e}"
-            f"  {vel[0]:>16.9e}  {vel[1]:>16.9e}  {vel[2]:>16.9e}"
+            f"{t_s:.16E}"
+            f" {pos[0]:.16E} {pos[1]:.16E} {pos[2]:.16E}"
+            f" {vel[0]:.16E} {vel[1]:.16E} {vel[2]:.16E}"
         )
 
-    lines += ["", "END Ephemeris", ""]
+    lines += ["\nEND Ephemeris\n"]
     Path(path).write_text("\n".join(lines), encoding="utf-8")
 
 
@@ -255,65 +252,216 @@ def propagate_keplerian(
 # ASAT direct-ascent trajectory
 # ---------------------------------------------------------------------------
 
+def _append_orbital_insertion(
+    pos_arr: np.ndarray,
+    vel_arr: np.ndarray,
+    ts: np.ndarray,
+    r_orbit: float,
+    speed_orbit: float,
+    dt_s: float,
+    n_transition: int = 50,
+    n_orbital: int = 100,
+) -> tuple:
+    """
+    Append a smooth orbital insertion to a climbing trajectory.
+
+    Transition phase (n_transition steps):
+        The velocity direction rotates from the current heading to purely
+        tangential using cosine blending.  Position stays on the sphere of
+        radius r_orbit by advancing only the tangential component each step.
+
+    Orbital phase (n_orbital steps):
+        Analytical circular motion at constant radius r_orbit and constant
+        speed speed_orbit in the plane established at the end of the transition.
+
+    The junction with the climbing phase is C1 continuous: position and
+    velocity are matched at the seam.
+
+    Returns
+    -------
+    (pos_arr, vel_arr, ts) — extended numpy arrays
+    """
+    p_end = pos_arr[-1].copy()
+    v_end = vel_arr[-1].copy()
+    t_end = float(ts[-1])
+
+    r_hat = p_end / np.linalg.norm(p_end)
+
+    # Tangential direction: remove radial component of v_end
+    v_tan_vec = v_end - np.dot(v_end, r_hat) * r_hat
+    v_tan_mag = float(np.linalg.norm(v_tan_vec))
+    if v_tan_mag < 1e-10:
+        ref   = np.array([0.0, 1.0, 0.0]) if abs(r_hat[0]) > 0.9 else np.array([1.0, 0.0, 0.0])
+        t_hat = np.cross(r_hat, ref)
+    else:
+        t_hat = v_tan_vec / v_tan_mag
+    t_hat = t_hat / np.linalg.norm(t_hat)
+
+    v_hat_start = v_end / np.linalg.norm(v_end)
+
+    # --- Transition phase ---------------------------------------------------
+    pos_trans = []
+    vel_trans = []
+    cur_dir   = r_hat.copy()   # unit position direction on sphere
+
+    for k in range(1, n_transition + 1):
+        theta = k / n_transition
+        blend = 0.5 * (1.0 - math.cos(math.pi * theta))   # cosine ease-in-out
+
+        v_dir = _slerp(v_hat_start, t_hat, blend)
+        v_dir = v_dir / np.linalg.norm(v_dir)
+        v_new = speed_orbit * v_dir
+
+        # Advance position on sphere using only the tangential velocity component
+        v_tan_now = v_new - np.dot(v_new, cur_dir) * cur_dir
+        dangle = np.linalg.norm(v_tan_now) * dt_s / r_orbit
+        if np.linalg.norm(v_tan_now) > 1e-10:
+            axis    = v_tan_now / np.linalg.norm(v_tan_now)
+            cur_dir = cur_dir * math.cos(dangle) + axis * math.sin(dangle)
+            cur_dir = cur_dir / np.linalg.norm(cur_dir)
+
+        pos_trans.append(r_orbit * cur_dir)
+        vel_trans.append(v_new)
+
+    # --- Orbital phase ------------------------------------------------------
+    r_orb_hat = cur_dir.copy()
+    # Ensure t_hat is perpendicular to the final position direction
+    t_orb_hat = t_hat - np.dot(t_hat, r_orb_hat) * r_orb_hat
+    t_orb_hat = t_orb_hat / np.linalg.norm(t_orb_hat)
+
+    omega = speed_orbit / r_orbit   # angular velocity [rad/s]
+
+    pos_orb = []
+    vel_orb = []
+    for k in range(n_orbital):
+        tau   = k * dt_s
+        angle = omega * tau
+        p = r_orbit * ( math.cos(angle) * r_orb_hat + math.sin(angle) * t_orb_hat)
+        v = speed_orbit * (-math.sin(angle) * r_orb_hat + math.cos(angle) * t_orb_hat)
+        pos_orb.append(p)
+        vel_orb.append(v)
+
+    # --- Assemble -----------------------------------------------------------
+    n_extra = n_transition + n_orbital
+    ts_extra = t_end + dt_s * np.arange(1, n_extra + 1)
+
+    pos_all = np.vstack(
+        [pos_arr] +
+        [p.reshape(1, 3) for p in pos_trans] +
+        [p.reshape(1, 3) for p in pos_orb]
+    )
+    vel_all = np.vstack(
+        [vel_arr] +
+        [v.reshape(1, 3) for v in vel_trans] +
+        [v.reshape(1, 3) for v in vel_orb]
+    )
+    ts_all = np.concatenate([ts, ts_extra])
+
+    return pos_all, vel_all, ts_all
+
+
 def generate_asat_trajectory(
     target_rows: list,
     launch_lat_deg: float,
     launch_lon_deg: float,
+    launch_alt_km: float,
     t_intercept_s: float,
     epoch: datetime,
-    dt_s: float = 10.0,
-) -> list:
+    dt_s: float = 1.0,
+    speed_end_kms: float = 2.0,
+) -> tuple:
     """
-    Direct-ascent non-ballistic ASAT trajectory model.
+    Direct-ascent ASAT trajectory with Newtonian gravitational deceleration.
 
-    The interceptor launches from the given ground site and ascends along a
-    great-circle arc in the J2000 ECI frame, reaching the target's ECI
-    position at t_intercept_s.  Altitude increases linearly with time.
-    Velocity is computed as the numerical derivative of the position profile.
+    The interceptor follows a great-circle arc in the J2000 ECI frame from the
+    launch site to the target position.  Speed at each point is given by energy
+    conservation (two-body gravity):
 
-    This models a powered/guided (non-ballistic) flight: the vehicle
-    continuously adjusts thrust to follow the arc rather than coasting.
+        v(r)^2 = v0^2 + 2*MU*(1/r - 1/r_launch)
+
+    The launch speed v0 is derived so that v(r_target) = speed_end_kms.
+    Flight time T_flight is computed by integrating ds/v(r) along the arc;
+    it may differ from t_intercept_s (which is used only to pick the target
+    position from the Hohmann rows).
 
     Parameters
     ----------
     target_rows    : Hohmann rows list of (t_s, pos_km, vel_kms)
-    launch_lat_deg : geodetic latitude of ASAT launch site [deg]
+    launch_lat_deg : geodetic latitude of launch site [deg]
     launch_lon_deg : longitude of launch site [deg]
-    t_intercept_s  : intercept time from epoch [s]
+    launch_alt_km  : altitude of launch site [km]
+    t_intercept_s  : time used to sample the target position from the Hohmann orbit [s]
     epoch          : UTC datetime for t=0
     dt_s           : time step [s]
+    speed_end_kms  : speed at intercept [km/s]; determines launch speed via energy conservation
 
     Returns
     -------
-    list of (t_s, pos_km, vel_kms) from t=0 to t=t_intercept_s
+    (rows, v0_kms, v_end_kms, T_flight_s) where rows = [(t_s, pos_km, vel_kms)]
     """
-    # Interpolate target ECI position at intercept time
-    t_arr = np.array([r[0] for r in target_rows])
-    idx   = int(np.clip(np.searchsorted(t_arr, t_intercept_s), 1, len(target_rows) - 1))
+    # Interpolate target ECI position at t_intercept_s
+    t_arr    = np.array([r[0] for r in target_rows])
+    idx      = int(np.clip(np.searchsorted(t_arr, t_intercept_s), 1, len(target_rows) - 1))
     t0, p0, _ = target_rows[idx - 1]
     t1, p1, _ = target_rows[idx]
-    frac_int  = (t_intercept_s - float(t0)) / (float(t1) - float(t0)) if t1 != t0 else 0.0
-    r_target  = np.array(p0, dtype=float) + frac_int * (np.array(p1) - np.array(p0))
+    frac_int = (t_intercept_s - float(t0)) / (float(t1) - float(t0)) if t1 != t0 else 0.0
+    r_target = np.array(p0, dtype=float) + frac_int * (np.array(p1) - np.array(p0))
 
-    # Launch site ECI position at epoch (t=0)
-    r_launch = np.array(lla_to_eci(launch_lat_deg, launch_lon_deg, 0.0, epoch), dtype=float)
+    # Launch site ECI position at epoch
+    r_launch = np.array(lla_to_eci(launch_lat_deg, launch_lon_deg, launch_alt_km, epoch),
+                        dtype=float)
 
     r_mag_0 = float(np.linalg.norm(r_launch))
     r_mag_1 = float(np.linalg.norm(r_target))
     u0      = r_launch / r_mag_0
     u1      = r_target / r_mag_1
 
-    ts = np.arange(0.0, t_intercept_s + dt_s * 0.5, dt_s)
-    pos_list = []
-    for t_s in ts:
-        frac = t_s / t_intercept_s
-        r_mag = r_mag_0 + (r_mag_1 - r_mag_0) * frac   # linear altitude profile
-        pos_list.append(r_mag * _slerp(u0, u1, frac))
+    # Build fine SLERP path and compute cumulative arc length and radii
+    N_fine     = 10_000
+    fracs_fine = np.linspace(0.0, 1.0, N_fine)
+    fine_pos   = np.array([
+        (r_mag_0 + (r_mag_1 - r_mag_0) * f) * _slerp(u0, u1, f)
+        for f in fracs_fine
+    ])
+    radii      = np.linalg.norm(fine_pos, axis=1)
+    arc_cum    = np.zeros(N_fine)
+    arc_cum[1:] = np.cumsum(np.linalg.norm(np.diff(fine_pos, axis=0), axis=1))
 
-    pos_arr = np.array(pos_list)
-    vel_arr = np.gradient(pos_arr, dt_s, axis=0)
+    # Launch speed from energy conservation: v0^2 = v_end^2 + 2*MU*(1/r0 - 1/r1)
+    delta_grav = 2.0 * MU * (1.0 / r_mag_0 - 1.0 / r_mag_1)
+    v0_sq = speed_end_kms ** 2 + delta_grav
+    if v0_sq < 0:
+        raise ValueError(
+            f"speed_end_kms={speed_end_kms:.2f} km/s too large: vehicle cannot reach "
+            f"r_target={r_mag_1:.1f} km from r_launch={r_mag_0:.1f} km"
+        )
+    v0 = math.sqrt(v0_sq)
 
-    return [(float(ts[i]), pos_arr[i], vel_arr[i]) for i in range(len(ts))]
+    # Speed at each fine position via energy conservation
+    v_fine = np.sqrt(np.maximum(1e-12, v0 ** 2 + 2.0 * MU * (1.0 / radii - 1.0 / r_mag_0)))
+
+    # Integrate dt = ds / v to get time as function of arc position
+    ds       = np.diff(arc_cum)
+    v_mid    = (v_fine[:-1] + v_fine[1:]) / 2.0
+    time_cum = np.zeros(N_fine)
+    time_cum[1:] = np.cumsum(ds / np.maximum(v_mid, 1e-12))
+    T_flight = float(time_cum[-1])
+
+    # Resample climbing phase at regular time steps by inverting t(arc) → arc(t)
+    ts       = np.arange(0.0, T_flight + dt_s * 0.5, dt_s)
+    arc_at_t = np.interp(ts, time_cum, arc_cum)
+    pos_arr  = np.column_stack([
+        np.interp(arc_at_t, arc_cum, fine_pos[:, i]) for i in range(3)
+    ])
+    vel_arr  = np.gradient(pos_arr, dt_s, axis=0)
+
+    # Append smooth orbital insertion (transition + constant-radius orbit)
+    pos_arr, vel_arr, ts = _append_orbital_insertion(
+        pos_arr, vel_arr, ts, r_mag_1, speed_end_kms, dt_s,
+    )
+
+    rows = [(float(ts[i]), pos_arr[i], vel_arr[i]) for i in range(len(ts))]
+    return rows, float(v0), float(v_fine[-1]), float(T_flight)
 
 
 # ---------------------------------------------------------------------------
@@ -352,6 +500,14 @@ def main():
     ap.add_argument(
         "--intercept-t", type=float, default=1800.0, metavar="S",
         help="ASAT intercept time from epoch [s, default 1800 = 30 min]",
+    )
+    ap.add_argument(
+        "--asat-start-alt", type=float, default=0.0, metavar="KM",
+        help="ASAT launch site altitude [km, default 0 = ground]",
+    )
+    ap.add_argument(
+        "--speed-end", type=float, default=2.0, metavar="KMS",
+        help="ASAT intercept speed [km/s, default 2.0]; launch speed derived via energy conservation",
     )
     args = ap.parse_args()
 
@@ -432,23 +588,35 @@ def main():
 
         print()
         print("ASAT direct-ascent parameters")
-        print(f"  Launch site       : lat={args.asat_lat:.2f} deg  lon={args.asat_lon:.2f} deg  alt=0 km")
-        print(f"  Intercept time    : {t_int:.0f} s  ({t_int/60:.1f} min)")
-        print(f"  Target altitude   : {alt_int:.0f} km  at t={t_int:.0f} s")
+        print(f"  Launch site       : lat={args.asat_lat:.2f} deg  lon={args.asat_lon:.2f} deg  "
+              f"alt={args.asat_start_alt:.1f} km")
+        print(f"  Target sample time: {t_int:.0f} s  ({t_int/60:.1f} min) from Hohmann orbit")
+        print(f"  Target altitude   : {alt_int:.0f} km")
+        print(f"  Requested v_end   : {args.speed_end:.2f} km/s")
         print()
 
         print("Propagating ASAT trajectory ... ", end="", flush=True)
-        asat_rows = generate_asat_trajectory(
-            rows, args.asat_lat, args.asat_lon, t_int, EPOCH, DT_S
+        asat_rows, v0_act, v_end_act, T_flight = generate_asat_trajectory(
+            rows, args.asat_lat, args.asat_lon, args.asat_start_alt,
+            t_int, EPOCH, DT_S, args.speed_end,
         )
         print(f"{len(asat_rows)} points")
+        mean_decel = (v_end_act - v0_act) / T_flight  # km/s^2 (negative)
+        print(f"  Launch speed      : {v0_act:.3f} km/s  (energy conservation)")
+        print(f"  Intercept speed   : {v_end_act:.3f} km/s")
+        print(f"  Flight time       : {T_flight:.1f} s  ({T_flight/60:.2f} min)")
+        print(f"  Mean deceleration : {mean_decel*1000:.4f} m/s^2")
 
         asat_comments = [
-            "ASAT direct-ascent (non-ballistic) trajectory",
-            f"Launch site: lat={args.asat_lat:.2f} deg  lon={args.asat_lon:.2f} deg  alt=0 km",
-            f"Intercept time: {t_int:.0f} s ({t_int/3600:.4f} h)",
-            f"Target altitude at intercept: {alt_int:.0f} km",
-            "Model: great-circle SLERP ascent in J2000 ECI (powered/guided flight)",
+            "ASAT direct-ascent trajectory -- Newtonian gravitational deceleration",
+            f"Launch site: lat={args.asat_lat:.2f} deg  lon={args.asat_lon:.2f} deg  "
+            f"alt={args.asat_start_alt:.1f} km",
+            f"Aimed at Hohmann position sampled at t={t_int:.0f} s (alt={alt_int:.0f} km)",
+            f"Launch speed: {v0_act:.3f} km/s  (derived from energy conservation)",
+            f"Intercept speed: {v_end_act:.3f} km/s",
+            f"Flight time: {T_flight:.1f} s ({T_flight/3600:.4f} h)",
+            "Speed profile: v(r)^2 = v0^2 + 2*MU*(1/r - 1/r_launch)",
+            "Path: great-circle SLERP in J2000 ECI",
         ]
         write_stk_ephem(args.asat_out, EPOCH, asat_rows, comments=asat_comments)
         print(f"Written -> {args.asat_out}")
